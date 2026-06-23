@@ -1,0 +1,31 @@
+# Python / tooling
+.venv/
+__pycache__/
+*.pyc
+
+# freerouting.jar (58 MB) — re-download from github releases
+tools/
+
+# KiCad transient / per-user
+*-bak
+*.kicad_prl
+fp-info-cache
+*~
+
+# Build artifacts (keep only the review PDF)
+build/*
+!build/pico2-knob.pdf
+
+# Leftover Pico-era lib, no longer used
+lib/KiCad-RP-Pico/
+
+# marbastlib: keep only the referenced symbol + footprint; drop 42 MB of 3D models etc.
+lib/marbastlib/3dmodels/
+lib/marbastlib/resources/
+lib/marbastlib/resources.zip
+lib/marbastlib/PCM/
+lib/marbastlib/libmanagement/
+lib/marbastlib/footprints/*
+!lib/marbastlib/footprints/marbastlib-xp-promicroish.pretty/
+lib/marbastlib/symbols/*
+!lib/marbastlib/symbols/marbastlib-promicroish.kicad_sym
