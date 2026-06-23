@@ -11,8 +11,9 @@ import pcbnew, os, re, math
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 OUT  = os.path.join(ROOT, "hardware", "pico2-knob.kicad_pcb")
-CX, CY, R = 150.0, 100.0, 40.0           # board center + radius (Ø80; bumped from 74 for
-                                         # fab edge-clearance on the bottom-mounted nano)
+CX, CY, R = 150.0, 100.0, 37.0           # board center + radius (Ø74)
+XCUT = 24.0                              # flat-trim the left/right edges at x = CX +/- XCUT
+                                         # (empty space there) -> vertical-lens outline
 KS = "/usr/share/kicad/footprints"
 
 def fpdir(nick):
@@ -22,12 +23,12 @@ def fpdir(nick):
 
 # ref, lib:footprint, mock_x, mock_y, rot_deg, on_back, value, {pad: net}
 PLACES = [
-    # nano on BACK, shifted up so its bottom pads clear the encoder; central channel free
-    ("U1", "marbastlib-xp-promicroish:nice_nano_AH_Reversible", 0, 20, 0, True, "nice!nano_v2", {
+    # nano on BACK; mock_y 18 (down 2mm from 20) so top pads clear the shrunk top rim
+    ("U1", "marbastlib-xp-promicroish:nice_nano_AH_Reversible", 0, 18, 0, True, "nice!nano_v2", {
         "16":"+3V3","3":"GND","4":"GND","14":"GND","28":"GND","13":"VBAT","29":"VBAT",
         "24":"ENC_A","23":"ENC_B","12":"ENC_SW","5":"SDA","6":"SCL","8":"BTN1","9":"BTN2","10":"BTN3"}),
-    # encoder placed so its SHAFT (footprint ~7.5,2.5) lands at puck center
-    ("RE1", "Rotary_Encoder:RotaryEncoder_Alps_EC11E-Switch_Vertical_H20mm", -7.5, 2.5, 0, False,
+    # encoder lowered 8mm (mock_y 2.5 -> -5.5): shaft now at board (150,108)
+    ("RE1", "Rotary_Encoder:RotaryEncoder_Alps_EC11E-Switch_Vertical_H20mm", -7.5, -5.5, 0, False,
         "RotaryEncoder_Switch", {"A":"ENC_A","B":"ENC_B","C":"GND","S1":"ENC_SW","S2":"GND"}),
     # SW_PUSH_6mm origin is its top-left pad, +3.25mm in X from the body center, so shift each
     # origin left 3.25mm -> button BODIES (the visible arc) are symmetric about the centerline.
@@ -66,25 +67,40 @@ for ref, fpstr, mx, my, rot, back, val, netmap in PLACES:
         n = netmap.get(pad.GetNumber())
         if n: pad.SetNet(net(n))
 
-# Ø74 round board outline on Edge.Cuts
-e = pcbnew.PCB_SHAPE(board); e.SetShape(pcbnew.SHAPE_T_CIRCLE); e.SetLayer(pcbnew.Edge_Cuts)
-e.SetCenter(pcbnew.VECTOR2I(pcbnew.FromMM(CX), pcbnew.FromMM(CY)))
-e.SetEnd(pcbnew.VECTOR2I(pcbnew.FromMM(CX + R), pcbnew.FromMM(CY)))
-e.SetWidth(pcbnew.FromMM(0.15)); board.Add(e)
+# Board outline: circle radius R clipped to |x-CX| <= XCUT (flat left/right). Edge.Cuts =
+# top arc + right line + bottom arc + left line.
+def V(x, y): return pcbnew.VECTOR2I(pcbnew.FromMM(x), pcbnew.FromMM(y))
+yc = (R * R - XCUT * XCUT) ** 0.5
+UL, UR = (CX - XCUT, CY - yc), (CX + XCUT, CY - yc)
+LR, LL = (CX + XCUT, CY + yc), (CX - XCUT, CY + yc)
+def edge(shape, *pts):
+    s = pcbnew.PCB_SHAPE(board); s.SetShape(shape); s.SetLayer(pcbnew.Edge_Cuts)
+    if shape == pcbnew.SHAPE_T_ARC: s.SetArcGeometry(V(*pts[0]), V(*pts[1]), V(*pts[2]))
+    else: s.SetStart(V(*pts[0])); s.SetEnd(V(*pts[1]))
+    s.SetWidth(pcbnew.FromMM(0.15)); board.Add(s)
+edge(pcbnew.SHAPE_T_ARC, UL, (CX, CY - R), UR)   # top arc
+edge(pcbnew.SHAPE_T_SEGMENT, UR, LR)             # right flat
+edge(pcbnew.SHAPE_T_ARC, LR, (CX, CY + R), LL)   # bottom arc
+edge(pcbnew.SHAPE_T_SEGMENT, LL, UL)             # left flat
 
 board.BuildListOfNets()
 
-# GND copper pours on both layers (circle inset 0.6mm from edge) -> ties all grounds
+# GND pours on both layers, following the trimmed outline inset 0.6mm
 gnd = nets["GND"]
+Rp, Xp = R - 0.6, XCUT - 0.6
+def trimmed_pts(n=44):
+    pts = []
+    for i in range(n + 1):                       # top arc L->R
+        x = CX - Xp + 2 * Xp * i / n; pts.append((x, CY - (Rp * Rp - (x - CX) ** 2) ** 0.5))
+    for i in range(n + 1):                       # bottom arc R->L
+        x = CX + Xp - 2 * Xp * i / n; pts.append((x, CY + (Rp * Rp - (x - CX) ** 2) ** 0.5))
+    return pts
 for layer in (pcbnew.F_Cu, pcbnew.B_Cu):
     z = pcbnew.ZONE(board)
     z.SetLayer(layer); z.SetNet(gnd); z.SetAssignedPriority(0)
     o = z.Outline(); o.NewOutline()
-    N = 96
-    for i in range(N):
-        a = 2 * math.pi * i / N
-        o.Append(pcbnew.FromMM(CX + (R - 0.6) * math.cos(a)),
-                 pcbnew.FromMM(CY + (R - 0.6) * math.sin(a)))
+    for x, y in trimmed_pts():
+        o.Append(pcbnew.FromMM(x), pcbnew.FromMM(y))
     board.Add(z)
 pcbnew.ZONE_FILLER(board).Fill(board.Zones())
 
