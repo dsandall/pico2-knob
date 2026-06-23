@@ -8,7 +8,10 @@ tools/
 
 # KiCad transient / per-user
 *-bak
+*-backups/
 *.kicad_prl
+*.lck
+~*.lck
 fp-info-cache
 *~
 
