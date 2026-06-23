@@ -9,7 +9,10 @@ BRD = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 # ref: (filename, offset_mm (x,y,z), rotation_deg (x,y,z))
 TRANSFORMS = {
     "RE1": ("encoder.step",  (7.5, -2.5, 0.0), (0, 0, 90)),    # shaft -> footprint (7.5,2.5)
-    "U1":  ("nicenano.step", (0.0,  0.0, 0.0), (0, 0, 90)),    # back-mounted; KiCad flips it
+    "U1":  ("nicenano.step", (0.0,  0.0, 8.5), (0, 0, 90)),    # back; +8.5mm = socket standoff
+                                                              # (clears the encoder peg ~1.8mm)
+    # OLED module on J1: connector(1.25,6) -> J1 pins(132,76.81); glass extends +X over knob
+    "J1":  ("oled.step",     (-1.25, -9.81, 3.0), (0, 0, 0)),
 }
 
 b = pcbnew.LoadBoard(BRD)

@@ -29,11 +29,15 @@ PLACES = [
     # encoder placed so its SHAFT (footprint ~7.5,2.5) lands at puck center
     ("RE1", "Rotary_Encoder:RotaryEncoder_Alps_EC11E-Switch_Vertical_H20mm", -7.5, 2.5, 0, False,
         "RotaryEncoder_Switch", {"A":"ENC_A","B":"ENC_B","C":"GND","S1":"ENC_SW","S2":"GND"}),
-    ("SW1", "Button_Switch_THT:SW_PUSH_6mm", -17, -13, 0, False, "SW_Push", {"1":"BTN1","2":"GND"}),
-    ("SW2", "Button_Switch_THT:SW_PUSH_6mm",   0, -20, 0, False, "SW_Push", {"1":"BTN2","2":"GND"}),
-    ("SW3", "Button_Switch_THT:SW_PUSH_6mm",  17, -13, 0, False, "SW_Push", {"1":"BTN3","2":"GND"}),
+    # SW_PUSH_6mm origin is its top-left pad, +3.25mm in X from the body center, so shift each
+    # origin left 3.25mm -> button BODIES (the visible arc) are symmetric about the centerline.
+    ("SW1", "Button_Switch_THT:SW_PUSH_6mm", -20.25, -13, 0, False, "SW_Push", {"1":"BTN1","2":"GND"}),
+    ("SW2", "Button_Switch_THT:SW_PUSH_6mm",  -3.25, -20, 0, False, "SW_Push", {"1":"BTN2","2":"GND"}),
+    ("SW3", "Button_Switch_THT:SW_PUSH_6mm",  13.75, -13, 0, False, "SW_Push", {"1":"BTN3","2":"GND"}),
     # OLED socket = single column -> sits in the nano's central channel (x0)
-    ("J1", "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical", 0, 27, 0, False,
+    # J1 offset LEFT ~18mm: the OLED module's connector sits ~18mm left of its glass center,
+    # so this lands the glass centered over the knob (per the module MCAD drawing).
+    ("J1", "Connector_PinSocket_2.54mm:PinSocket_1x04_P2.54mm_Vertical", -18, 27, 0, False,
         "OLED_0.87_I2C", {"1":"GND","2":"+3V3","3":"SCL","4":"SDA"}),
     ("R1", "Resistor_SMD:R_0603_1608Metric", -15, -28, 0, False, "4k7", {"1":"+3V3","2":"SCL"}),
     ("R2", "Resistor_SMD:R_0603_1608Metric",  15, -28, 0, False, "4k7", {"1":"+3V3","2":"SDA"}),
