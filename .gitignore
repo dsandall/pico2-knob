@@ -32,3 +32,6 @@ lib/marbastlib/footprints/*
 !lib/marbastlib/footprints/marbastlib-xp-promicroish.pretty/
 lib/marbastlib/symbols/*
 !lib/marbastlib/symbols/marbastlib-promicroish.kicad_sym
+
+# FreeCAD backups
+*.FCStd1
