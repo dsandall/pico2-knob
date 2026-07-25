@@ -1,7 +1,4 @@
-# Python / tooling
-.venv/
-__pycache__/
-*.pyc
+
 
 # freerouting.jar (58 MB) — re-download from github releases
 tools/
@@ -14,6 +11,13 @@ tools/
 ~*.lck
 fp-info-cache
 *~
+**-backups/
+**.kicad_prl
+fp-info-cache
+**.kicad_pcb-bak
+**.kicad_sch-bak
+_autosave-**
+**.lck
 
 # Build artifacts (keep only the review PDF)
 build/*
@@ -34,4 +38,12 @@ lib/marbastlib/symbols/*
 !lib/marbastlib/symbols/marbastlib-promicroish.kicad_sym
 
 # FreeCAD backups
-*.FCStd1
+**.FCStd1
+**.FCBak
+
+# Python
+**__pycache__
+.venv/
+*.pyc
+
+
