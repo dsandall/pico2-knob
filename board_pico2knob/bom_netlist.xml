@@ -1,0 +1,1330 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<export version="E">
+  <design>
+    <source>/home/thebu/newhome/projects/pico2-knob/board_pico2knob/pico2-knob.kicad_sch</source>
+    <date>2026-07-26T02:05:25</date>
+    <tool>Eeschema 10.0.4</tool>
+    <sheet number="1" name="/" tstamps="/">
+      <title_block>
+        <title/>
+        <company/>
+        <rev/>
+        <date/>
+        <source>pico2-knob.kicad_sch</source>
+        <comment number="1" value=""/>
+        <comment number="2" value=""/>
+        <comment number="3" value=""/>
+        <comment number="4" value=""/>
+        <comment number="5" value=""/>
+        <comment number="6" value=""/>
+        <comment number="7" value=""/>
+        <comment number="8" value=""/>
+        <comment number="9" value=""/>
+      </title_block>
+    </sheet>
+  </design>
+  <components>
+    <comp ref="C1">
+      <value>680pF</value>
+      <footprint>Capacitor_SMD:C_1206_3216Metric</footprint>
+      <description>Unpolarized capacitor</description>
+      <fields>
+        <field name="MFRPN">CC1206KRX7R9BB681</field>
+        <field name="Footprint">Capacitor_SMD:C_1206_3216Metric</field>
+        <field name="Datasheet"/>
+        <field name="Description">Unpolarized capacitor</field>
+      </fields>
+      <libsource lib="Device" part="C" description="Unpolarized capacitor"/>
+      <property name="MFRPN" value="CC1206KRX7R9BB681"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="cap capacitor"/>
+      <property name="ki_fp_filters" value="C_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>588b91bc-1e28-492a-a3ba-0f661ca1dc60</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="C2">
+      <value>22uF</value>
+      <footprint>Capacitor_SMD:C_1210_3225Metric</footprint>
+      <fields>
+        <field name="MFRPN">GRM32ER61E226KE15L</field>
+        <field name="Footprint">Capacitor_SMD:C_1210_3225Metric</field>
+        <field name="Datasheet"/>
+        <field name="Description"/>
+      </fields>
+      <libsource lib="Device" part="C" description="Unpolarized capacitor"/>
+      <property name="MFRPN" value="GRM32ER61E226KE15L"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="cap capacitor"/>
+      <property name="ki_fp_filters" value="C_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>7d724292-bbb5-40f9-a755-edf4f5f5dd4e</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="C3">
+      <value>10uF</value>
+      <footprint>Capacitor_SMD:C_1206_3216Metric</footprint>
+      <fields>
+        <field name="MFRPN">GRM31CR61E106KA12L</field>
+        <field name="Footprint">Capacitor_SMD:C_1206_3216Metric</field>
+        <field name="Datasheet"/>
+        <field name="Description"/>
+      </fields>
+      <libsource lib="Device" part="C" description="Unpolarized capacitor"/>
+      <property name="MFRPN" value="GRM31CR61E106KA12L"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="cap capacitor"/>
+      <property name="ki_fp_filters" value="C_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>a94f5ff3-cd18-4010-aa7a-15e3cbc76d30</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="C4">
+      <value>1u</value>
+      <footprint>Capacitor_SMD:C_1206_3216Metric</footprint>
+      <description>Unpolarized capacitor</description>
+      <fields>
+        <field name="MFRPN">CL31B105KBHNNNE</field>
+        <field name="Footprint">Capacitor_SMD:C_1206_3216Metric</field>
+        <field name="Datasheet"/>
+        <field name="Description">Unpolarized capacitor</field>
+      </fields>
+      <libsource lib="Device" part="C" description="Unpolarized capacitor"/>
+      <property name="MFRPN" value="CL31B105KBHNNNE"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="cap capacitor"/>
+      <property name="ki_fp_filters" value="C_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>e4358715-c04a-477c-92f1-978d4e34fad1</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="C5">
+      <value>4.7u</value>
+      <footprint>Capacitor_SMD:C_1206_3216Metric</footprint>
+      <description>Unpolarized capacitor</description>
+      <fields>
+        <field name="MFRPN">GRM31CR61E475KA12L</field>
+        <field name="Footprint">Capacitor_SMD:C_1206_3216Metric</field>
+        <field name="Datasheet"/>
+        <field name="Description">Unpolarized capacitor</field>
+      </fields>
+      <libsource lib="Device" part="C" description="Unpolarized capacitor"/>
+      <property name="MFRPN" value="GRM31CR61E475KA12L"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="cap capacitor"/>
+      <property name="ki_fp_filters" value="C_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>8f3237f1-8831-4f0b-8eea-5ecb5eb739c1</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="D1">
+      <value>1N5819</value>
+      <footprint>Diode_SMD:D_SMA</footprint>
+      <description>Schottky diode</description>
+      <fields>
+        <field name="MFRPN">SS14-E3/61T</field>
+        <field name="Footprint">Diode_SMD:D_SMA</field>
+        <field name="Datasheet"/>
+        <field name="Description">Schottky diode</field>
+      </fields>
+      <libsource lib="Device" part="D_Schottky" description="Schottky diode"/>
+      <property name="MFRPN" value="SS14-E3/61T"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="diode Schottky"/>
+      <property name="ki_fp_filters" value="TO-???* *_Diode_* *SingleDiode* D_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>9b1cdba2-1870-4d90-9b85-c5013381e8ff</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="DS1">
+      <value>ER-OLED1.12-2</value>
+      <datasheet>ER-OLED1.12-2_Datasheet.pdf</datasheet>
+      <description>EastRising ER-OLED1.12-2W 1.12in 128x128 SH1107 OLED module (20-pin FPC). Module symbol, no footprint; mates to ER-CON20HT-1.</description>
+      <fields>
+        <field name="MFRPN">ER-OLED1.12-2W</field>
+        <field name="Footprint"/>
+        <field name="Datasheet">ER-OLED1.12-2_Datasheet.pdf</field>
+        <field name="Description">EastRising ER-OLED1.12-2W 1.12in 128x128 SH1107 OLED module (20-pin FPC). Module symbol, no footprint; mates to ER-CON20HT-1.</field>
+      </fields>
+      <libsource lib="pico2-knob" part="ER-OLED1.12-2" description="EastRising ER-OLED1.12-2W 1.12in 128x128 SH1107 OLED module (20-pin FPC). Module symbol, no footprint; mates to ER-CON20HT-1."/>
+      <property name="MFRPN" value="ER-OLED1.12-2W"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>7fd6dcdc-899f-4ebb-a7e0-1263c52fb388</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+            <pin num="3"/>
+            <pin num="4"/>
+            <pin num="5"/>
+            <pin num="6"/>
+            <pin num="7"/>
+            <pin num="8"/>
+            <pin num="9"/>
+            <pin num="10"/>
+            <pin num="11"/>
+            <pin num="12"/>
+            <pin num="13"/>
+            <pin num="14"/>
+            <pin num="15"/>
+            <pin num="16"/>
+            <pin num="17"/>
+            <pin num="18"/>
+            <pin num="19"/>
+            <pin num="20"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="J2">
+      <value>LiPo_JST_PH</value>
+      <footprint>Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal</footprint>
+      <fields>
+        <field name="MFRPN">S2B-PH-K-S</field>
+        <field name="Footprint">Connector_JST:JST_PH_S2B-PH-K_1x02_P2.00mm_Horizontal</field>
+        <field name="Datasheet"/>
+        <field name="Description"/>
+      </fields>
+      <libsource lib="Connector_Generic" part="Conn_01x02" description="Generic connector, single row, 01x02, script generated (kicad-library-utils/schlib/autogen/connector/)"/>
+      <property name="MFRPN" value="S2B-PH-K-S"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="connector"/>
+      <property name="ki_fp_filters" value="Connector*:*_1x??_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>4576a2d8-d55b-45c5-aa26-c65a63b6238d</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="J3">
+      <value>ER-CON20HT-1</value>
+      <footprint>pico2-knob:ER-CON20HT-1</footprint>
+      <datasheet>ER-CON20HT-1.pdf</datasheet>
+      <description>EastRising ER-CON20HT-1 20-pin 0.5mm SMD horizontal top-contact FFC/FPC/ZIF connector</description>
+      <fields>
+        <field name="MFRPN">ER-CON20HT-1</field>
+        <field name="Footprint">pico2-knob:ER-CON20HT-1</field>
+        <field name="Datasheet">ER-CON20HT-1.pdf</field>
+        <field name="Description">EastRising ER-CON20HT-1 20-pin 0.5mm SMD horizontal top-contact FFC/FPC/ZIF connector</field>
+      </fields>
+      <libsource lib="pico2-knob" part="ER-CON20HT-1" description="EastRising ER-CON20HT-1 20-pin 0.5mm SMD horizontal top-contact FFC/FPC/ZIF connector"/>
+      <property name="MFRPN" value="ER-CON20HT-1"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="connector"/>
+      <property name="ki_fp_filters" value="Connector*:*_1x??_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>785bc008-53f3-4761-a3e6-b1809940fb6c</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+            <pin num="3"/>
+            <pin num="4"/>
+            <pin num="5"/>
+            <pin num="6"/>
+            <pin num="7"/>
+            <pin num="8"/>
+            <pin num="9"/>
+            <pin num="10"/>
+            <pin num="11"/>
+            <pin num="12"/>
+            <pin num="13"/>
+            <pin num="14"/>
+            <pin num="15"/>
+            <pin num="16"/>
+            <pin num="17"/>
+            <pin num="18"/>
+            <pin num="19"/>
+            <pin num="20"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="L1">
+      <value>100uH</value>
+      <footprint>Inductor_SMD:L_12x12mm_H6mm</footprint>
+      <description>Inductor</description>
+      <fields>
+        <field name="MFRPN">SRR1260-101M</field>
+        <field name="Footprint">Inductor_SMD:L_12x12mm_H6mm</field>
+        <field name="Datasheet"/>
+        <field name="Description">Inductor</field>
+      </fields>
+      <libsource lib="Device" part="L" description="Inductor"/>
+      <property name="MFRPN" value="SRR1260-101M"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="inductor choke coil reactor magnetic"/>
+      <property name="ki_fp_filters" value="Choke_* *Coil* Inductor_* L_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>581e8fe9-328b-4ed3-a2d2-7e4575ae7955</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="R1">
+      <value>910k</value>
+      <footprint>Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal</footprint>
+      <description>Resistor, US symbol</description>
+      <fields>
+        <field name="MFRPN">MFR-25FBF52-910K</field>
+        <field name="Footprint">Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal</field>
+        <field name="Datasheet"/>
+        <field name="Description">Resistor, US symbol</field>
+      </fields>
+      <libsource lib="Device" part="R_US" description="Resistor, US symbol"/>
+      <property name="MFRPN" value="MFR-25FBF52-910K"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="R res resistor"/>
+      <property name="ki_fp_filters" value="R_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>d66da1f4-75d1-4af2-b015-39ccb8bee963</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="R2">
+      <value>10k</value>
+      <footprint>Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal</footprint>
+      <description>Resistor, US symbol</description>
+      <fields>
+        <field name="MFRPN">MFR-25FBF52-10K</field>
+        <field name="Footprint">Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal</field>
+        <field name="Datasheet"/>
+        <field name="Description">Resistor, US symbol</field>
+      </fields>
+      <libsource lib="Device" part="R_US" description="Resistor, US symbol"/>
+      <property name="MFRPN" value="MFR-25FBF52-10K"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="R res resistor"/>
+      <property name="ki_fp_filters" value="R_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>94ce0c00-a08e-415a-b1d7-165c750346ee</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="R3">
+      <value>0.68</value>
+      <footprint>Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal</footprint>
+      <description>Resistor, US symbol</description>
+      <fields>
+        <field name="MFRPN">CFR-25JB-52-R68</field>
+        <field name="Footprint">Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal</field>
+        <field name="Datasheet"/>
+        <field name="Description">Resistor, US symbol</field>
+      </fields>
+      <libsource lib="Device" part="R_US" description="Resistor, US symbol"/>
+      <property name="MFRPN" value="CFR-25JB-52-R68"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="R res resistor"/>
+      <property name="ki_fp_filters" value="R_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>33dad5f3-dfb4-46c7-92a1-f843547f5263</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="R4">
+      <value>1k</value>
+      <footprint>Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal</footprint>
+      <description>Resistor, US symbol</description>
+      <fields>
+        <field name="MFRPN">MFR-25FBF52-1K</field>
+        <field name="Footprint">Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal</field>
+        <field name="Datasheet"/>
+        <field name="Description">Resistor, US symbol</field>
+      </fields>
+      <libsource lib="Device" part="R_US" description="Resistor, US symbol"/>
+      <property name="MFRPN" value="MFR-25FBF52-1K"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="R res resistor"/>
+      <property name="ki_fp_filters" value="R_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>61921b03-014a-4c75-985e-4d6f2bafc419</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="R5">
+      <value>8.66k</value>
+      <footprint>Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal</footprint>
+      <description>Resistor, US symbol</description>
+      <fields>
+        <field name="MFRPN">MFR-25FBF52-8K66</field>
+        <field name="Footprint">Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal</field>
+        <field name="Datasheet"/>
+        <field name="Description">Resistor, US symbol</field>
+      </fields>
+      <libsource lib="Device" part="R_US" description="Resistor, US symbol"/>
+      <property name="MFRPN" value="MFR-25FBF52-8K66"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="R res resistor"/>
+      <property name="ki_fp_filters" value="R_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>6ba5b820-5b40-4791-80ca-1ace8244bf5b</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="R6">
+      <value>10k</value>
+      <footprint>Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal</footprint>
+      <description>Resistor, US symbol</description>
+      <fields>
+        <field name="MFRPN">MFR-25FBF52-10K</field>
+        <field name="Footprint">Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal</field>
+        <field name="Datasheet"/>
+        <field name="Description">Resistor, US symbol</field>
+      </fields>
+      <libsource lib="Device" part="R_US" description="Resistor, US symbol"/>
+      <property name="MFRPN" value="MFR-25FBF52-10K"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="R res resistor"/>
+      <property name="ki_fp_filters" value="R_*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>e9e1d3ff-5cb8-4dcb-9904-3e1c6469fa56</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="RE1">
+      <value>RotaryEncoder_Switch</value>
+      <footprint>Rotary_Encoder:RotaryEncoder_Alps_EC11E-Switch_Vertical_H20mm</footprint>
+      <fields>
+        <field name="MFRPN">EC11E15244G1</field>
+        <field name="Footprint">Rotary_Encoder:RotaryEncoder_Alps_EC11E-Switch_Vertical_H20mm</field>
+        <field name="Datasheet"/>
+        <field name="Description"/>
+      </fields>
+      <libsource lib="Device" part="RotaryEncoder_Switch" description="Rotary encoder, dual channel, incremental quadrate outputs, with switch"/>
+      <property name="MFRPN" value="EC11E15244G1"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="rotary switch encoder switch push button"/>
+      <property name="ki_fp_filters" value="RotaryEncoder*Switch*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>4c00e5ff-8eb1-4533-89b0-1e69edf78afc</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="A"/>
+            <pin num="C"/>
+            <pin num="B"/>
+            <pin num="S1"/>
+            <pin num="S2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="SW1">
+      <value>SW_Push</value>
+      <footprint>Button_Switch_THT:SW_PUSH_6mm</footprint>
+      <fields>
+        <field name="MFRPN">SKHHAKA010</field>
+        <field name="Footprint">Button_Switch_THT:SW_PUSH_6mm</field>
+        <field name="Datasheet"/>
+        <field name="Description"/>
+      </fields>
+      <libsource lib="Switch" part="SW_Push" description="Push button switch, generic, two pins"/>
+      <property name="MFRPN" value="SKHHAKA010"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="switch normally-open pushbutton push-button"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>4933d270-6339-4166-b29e-21f60c9b39e8</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="SW2">
+      <value>SW_Push</value>
+      <footprint>Button_Switch_THT:SW_PUSH_6mm</footprint>
+      <fields>
+        <field name="MFRPN">SKHHAKA010</field>
+        <field name="Footprint">Button_Switch_THT:SW_PUSH_6mm</field>
+        <field name="Datasheet"/>
+        <field name="Description"/>
+      </fields>
+      <libsource lib="Switch" part="SW_Push" description="Push button switch, generic, two pins"/>
+      <property name="MFRPN" value="SKHHAKA010"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="switch normally-open pushbutton push-button"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>88b48f50-f3de-4ac2-9509-024127f9c397</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="SW3">
+      <value>SW_Push</value>
+      <footprint>Button_Switch_THT:SW_PUSH_6mm</footprint>
+      <fields>
+        <field name="MFRPN">SKHHAKA010</field>
+        <field name="Footprint">Button_Switch_THT:SW_PUSH_6mm</field>
+        <field name="Datasheet"/>
+        <field name="Description"/>
+      </fields>
+      <libsource lib="Switch" part="SW_Push" description="Push button switch, generic, two pins"/>
+      <property name="MFRPN" value="SKHHAKA010"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="switch normally-open pushbutton push-button"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>bf53b558-a607-49c8-b07b-e514252aa2ba</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+            <pin num="2"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="TP1">
+      <value>TestPoint</value>
+      <footprint>TestPoint:TestPoint_Pad_D1.5mm</footprint>
+      <description>test point</description>
+      <fields>
+        <field name="Footprint">TestPoint:TestPoint_Pad_D1.5mm</field>
+        <field name="Datasheet"/>
+        <field name="Description">test point</field>
+      </fields>
+      <libsource lib="Connector" part="TestPoint" description="test point"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="test point tp"/>
+      <property name="ki_fp_filters" value="Pin* Test*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>a698b1db-e612-4117-97b5-bd40f960c53b</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="TP2">
+      <value>TestPoint</value>
+      <footprint>TestPoint:TestPoint_Pad_D1.5mm</footprint>
+      <description>test point</description>
+      <fields>
+        <field name="Footprint">TestPoint:TestPoint_Pad_D1.5mm</field>
+        <field name="Datasheet"/>
+        <field name="Description">test point</field>
+      </fields>
+      <libsource lib="Connector" part="TestPoint" description="test point"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="test point tp"/>
+      <property name="ki_fp_filters" value="Pin* Test*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>cdf73479-3a7c-4dab-b9b9-28c188b43fe3</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="TP3">
+      <value>TestPoint</value>
+      <footprint>TestPoint:TestPoint_Pad_D1.5mm</footprint>
+      <description>test point</description>
+      <fields>
+        <field name="Footprint">TestPoint:TestPoint_Pad_D1.5mm</field>
+        <field name="Datasheet"/>
+        <field name="Description">test point</field>
+      </fields>
+      <libsource lib="Connector" part="TestPoint" description="test point"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="test point tp"/>
+      <property name="ki_fp_filters" value="Pin* Test*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>2f7f8810-e91b-4b9d-9121-d5f268a245f1</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="1"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="U1">
+      <value>nice!nano_v2</value>
+      <footprint>marbastlib-xp-promicroish:nice_nano_AH_Reversible</footprint>
+      <fields>
+        <field name="MFRPN">nice!nano_v2</field>
+        <field name="Footprint">marbastlib-xp-promicroish:nice_nano_AH_Reversible</field>
+        <field name="Datasheet"/>
+        <field name="Description"/>
+      </fields>
+      <libsource lib="marbastlib-promicroish" part="nice_nano" description="Symbol for an nicekeyboards nice!nano"/>
+      <property name="MFRPN" value="nice!nano_v2"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>e041f810-11ef-402c-a530-79d668f2007d</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="28"/>
+            <pin num="1"/>
+            <pin num="2"/>
+            <pin num="3"/>
+            <pin num="4"/>
+            <pin num="5"/>
+            <pin num="6"/>
+            <pin num="7"/>
+            <pin num="8"/>
+            <pin num="9"/>
+            <pin num="10"/>
+            <pin num="11"/>
+            <pin num="12"/>
+            <pin num="25"/>
+            <pin num="26"/>
+            <pin num="27"/>
+            <pin num="29"/>
+            <pin num="13"/>
+            <pin num="14"/>
+            <pin num="15"/>
+            <pin num="16"/>
+            <pin num="17"/>
+            <pin num="18"/>
+            <pin num="19"/>
+            <pin num="20"/>
+            <pin num="21"/>
+            <pin num="22"/>
+            <pin num="23"/>
+            <pin num="24"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+    <comp ref="U2">
+      <value>MC34063AD</value>
+      <footprint>Package_SO:SOIC-8_3.9x4.9mm_P1.27mm</footprint>
+      <datasheet>http://www.onsemi.com/pub_link/Collateral/MC34063A-D.PDF</datasheet>
+      <description>1.5A, step-up/down/inverting switching regulator, 3-40V Vin, 100kHz, SO-8</description>
+      <fields>
+        <field name="MFRPN">MC34063ADR2G</field>
+        <field name="Footprint">Package_SO:SOIC-8_3.9x4.9mm_P1.27mm</field>
+        <field name="Datasheet">http://www.onsemi.com/pub_link/Collateral/MC34063A-D.PDF</field>
+        <field name="Description">1.5A, step-up/down/inverting switching regulator, 3-40V Vin, 100kHz, SO-8</field>
+      </fields>
+      <libsource lib="Regulator_Switching" part="MC34063AD" description="1.5A, step-up/down/inverting switching regulator, 3-40V Vin, 100kHz, SO-8"/>
+      <property name="MFRPN" value="MC34063ADR2G"/>
+      <property name="Sheetname" value="pico2-knob"/>
+      <property name="Sheetfile" value="pico2-knob.kicad_sch"/>
+      <property name="ki_keywords" value="smps buck boost inverting"/>
+      <property name="ki_fp_filters" value="SOIC*3.9x4.9mm*P1.27mm*"/>
+      <sheetpath names="/" tstamps="/"/>
+      <tstamps>f18bb8d2-6f6a-45e5-9cb4-666a7dc30054</tstamps>
+      <units>
+        <unit name="A">
+          <pins>
+            <pin num="6"/>
+            <pin num="3"/>
+            <pin num="4"/>
+            <pin num="7"/>
+            <pin num="8"/>
+            <pin num="1"/>
+            <pin num="2"/>
+            <pin num="5"/>
+          </pins>
+        </unit>
+      </units>
+    </comp>
+  </components>
+  <libparts>
+    <libpart lib="Connector" part="TestPoint">
+      <description>test point</description>
+      <footprints>
+        <fp>Pin*</fp>
+        <fp>Test*</fp>
+      </footprints>
+      <fields>
+        <field name="Reference">TP</field>
+        <field name="Value">TestPoint</field>
+        <field name="Footprint"/>
+        <field name="Datasheet"/>
+        <field name="Description">test point</field>
+      </fields>
+      <pins>
+        <pin num="1" name="1" type="passive"/>
+      </pins>
+    </libpart>
+    <libpart lib="Connector_Generic" part="Conn_01x02">
+      <description>Generic connector, single row, 01x02, script generated (kicad-library-utils/schlib/autogen/connector/)</description>
+      <footprints>
+        <fp>Connector*:*_1x??_*</fp>
+      </footprints>
+      <fields>
+        <field name="Reference">J</field>
+        <field name="Value">Conn_01x02</field>
+        <field name="Footprint"/>
+        <field name="Datasheet"/>
+        <field name="Description">Generic connector, single row, 01x02, script generated (kicad-library-utils/schlib/autogen/connector/)</field>
+      </fields>
+      <pins>
+        <pin num="1" name="Pin_1" type="passive"/>
+        <pin num="2" name="Pin_2" type="passive"/>
+      </pins>
+    </libpart>
+    <libpart lib="Device" part="C">
+      <description>Unpolarized capacitor</description>
+      <footprints>
+        <fp>C_*</fp>
+      </footprints>
+      <fields>
+        <field name="Reference">C</field>
+        <field name="Value">C</field>
+        <field name="Footprint"/>
+        <field name="Datasheet"/>
+        <field name="Description">Unpolarized capacitor</field>
+      </fields>
+      <pins>
+        <pin num="1" name="" type="passive"/>
+        <pin num="2" name="" type="passive"/>
+      </pins>
+    </libpart>
+    <libpart lib="Device" part="D_Schottky">
+      <description>Schottky diode</description>
+      <footprints>
+        <fp>TO-???*</fp>
+        <fp>*_Diode_*</fp>
+        <fp>*SingleDiode*</fp>
+        <fp>D_*</fp>
+      </footprints>
+      <fields>
+        <field name="Reference">D</field>
+        <field name="Value">D_Schottky</field>
+        <field name="Footprint"/>
+        <field name="Datasheet"/>
+        <field name="Description">Schottky diode</field>
+      </fields>
+      <pins>
+        <pin num="1" name="K" type="passive"/>
+        <pin num="2" name="A" type="passive"/>
+      </pins>
+    </libpart>
+    <libpart lib="Device" part="L">
+      <description>Inductor</description>
+      <footprints>
+        <fp>Choke_*</fp>
+        <fp>*Coil*</fp>
+        <fp>Inductor_*</fp>
+        <fp>L_*</fp>
+      </footprints>
+      <fields>
+        <field name="Reference">L</field>
+        <field name="Value">L</field>
+        <field name="Footprint"/>
+        <field name="Datasheet"/>
+        <field name="Description">Inductor</field>
+      </fields>
+      <pins>
+        <pin num="1" name="1" type="passive"/>
+        <pin num="2" name="2" type="passive"/>
+      </pins>
+    </libpart>
+    <libpart lib="Device" part="R_US">
+      <description>Resistor, US symbol</description>
+      <footprints>
+        <fp>R_*</fp>
+      </footprints>
+      <fields>
+        <field name="Reference">R</field>
+        <field name="Value">R_US</field>
+        <field name="Footprint"/>
+        <field name="Datasheet"/>
+        <field name="Description">Resistor, US symbol</field>
+      </fields>
+      <pins>
+        <pin num="1" name="" type="passive"/>
+        <pin num="2" name="" type="passive"/>
+      </pins>
+    </libpart>
+    <libpart lib="Device" part="RotaryEncoder_Switch">
+      <description>Rotary encoder, dual channel, incremental quadrate outputs, with switch</description>
+      <footprints>
+        <fp>RotaryEncoder*Switch*</fp>
+      </footprints>
+      <fields>
+        <field name="Reference">SW</field>
+        <field name="Value">RotaryEncoder_Switch</field>
+        <field name="Footprint"/>
+        <field name="Datasheet"/>
+        <field name="Description">Rotary encoder, dual channel, incremental quadrate outputs, with switch</field>
+      </fields>
+      <pins>
+        <pin num="A" name="A" type="passive"/>
+        <pin num="B" name="B" type="passive"/>
+        <pin num="C" name="C" type="passive"/>
+        <pin num="S1" name="S1" type="passive"/>
+        <pin num="S2" name="S2" type="passive"/>
+      </pins>
+    </libpart>
+    <libpart lib="Regulator_Switching" part="MC34063AD">
+      <description>1.5A, step-up/down/inverting switching regulator, 3-40V Vin, 100kHz, SO-8</description>
+      <docs>http://www.onsemi.com/pub_link/Collateral/MC34063A-D.PDF</docs>
+      <footprints>
+        <fp>SOIC*3.9x4.9mm*P1.27mm*</fp>
+      </footprints>
+      <fields>
+        <field name="Reference">U</field>
+        <field name="Value">MC34063AD</field>
+        <field name="Footprint">Package_SO:SOIC-8_3.9x4.9mm_P1.27mm</field>
+        <field name="Datasheet">http://www.onsemi.com/pub_link/Collateral/MC34063A-D.PDF</field>
+        <field name="Description">1.5A, step-up/down/inverting switching regulator, 3-40V Vin, 100kHz, SO-8</field>
+      </fields>
+      <pins>
+        <pin num="1" name="SwC" type="open_collector"/>
+        <pin num="2" name="SwE" type="open_emitter"/>
+        <pin num="3" name="TC" type="passive"/>
+        <pin num="4" name="GND" type="power_in"/>
+        <pin num="5" name="Vfb" type="input"/>
+        <pin num="6" name="Vin" type="power_in"/>
+        <pin num="7" name="Ipk" type="input"/>
+        <pin num="8" name="DC" type="open_collector"/>
+      </pins>
+    </libpart>
+    <libpart lib="Switch" part="SW_Push">
+      <description>Push button switch, generic, two pins</description>
+      <fields>
+        <field name="Reference">SW</field>
+        <field name="Value">SW_Push</field>
+        <field name="Footprint"/>
+        <field name="Datasheet"/>
+        <field name="Description">Push button switch, generic, two pins</field>
+      </fields>
+      <pins>
+        <pin num="1" name="1" type="passive"/>
+        <pin num="2" name="2" type="passive"/>
+      </pins>
+    </libpart>
+    <libpart lib="marbastlib-promicroish" part="nice_nano">
+      <description>Symbol for an nicekeyboards nice!nano</description>
+      <docs>https://nicekeyboards.com/docs/nice-nano/pinout-schematic</docs>
+      <fields>
+        <field name="Reference">U</field>
+        <field name="Value">nice_nano</field>
+        <field name="Footprint">PCM_marbastlib-xp-promicroish:nice_nano_AH_USBup</field>
+        <field name="Datasheet">https://nicekeyboards.com/docs/nice-nano/pinout-schematic</field>
+        <field name="Description">Symbol for an nicekeyboards nice!nano</field>
+      </fields>
+      <pins>
+        <pin num="1" name="P0.06" type="bidirectional"/>
+        <pin num="2" name="P0.08" type="bidirectional"/>
+        <pin num="3" name="GND" type="power_out"/>
+        <pin num="4" name="GND" type="passive"/>
+        <pin num="5" name="P0.17" type="bidirectional"/>
+        <pin num="6" name="P0.20" type="bidirectional"/>
+        <pin num="7" name="P0.22" type="bidirectional"/>
+        <pin num="8" name="P0.24" type="bidirectional"/>
+        <pin num="9" name="P1.00" type="bidirectional"/>
+        <pin num="10" name="P0.11" type="bidirectional"/>
+        <pin num="11" name="P1.04-LF" type="bidirectional"/>
+        <pin num="12" name="P1.06-LF" type="bidirectional"/>
+        <pin num="13" name="BAT+" type="power_out"/>
+        <pin num="14" name="GND" type="passive"/>
+        <pin num="15" name="RST" type="bidirectional"/>
+        <pin num="16" name="3V3" type="power_out"/>
+        <pin num="17" name="P0.31-LF" type="bidirectional"/>
+        <pin num="18" name="P0.29-LF" type="bidirectional"/>
+        <pin num="19" name="P0.02-LF" type="bidirectional"/>
+        <pin num="20" name="P1.15-LF" type="bidirectional"/>
+        <pin num="21" name="P1.13-LF" type="bidirectional"/>
+        <pin num="22" name="P1.11-LF" type="bidirectional"/>
+        <pin num="23" name="P0.10-LF" type="bidirectional"/>
+        <pin num="24" name="P0.09-LF" type="bidirectional"/>
+        <pin num="25" name="P1.01-LF" type="bidirectional"/>
+        <pin num="26" name="P1.02-LF" type="bidirectional"/>
+        <pin num="27" name="P1.07-LF" type="bidirectional"/>
+        <pin num="28" name="GND" type="passive"/>
+        <pin num="29" name="BAT+" type="passive"/>
+      </pins>
+    </libpart>
+    <libpart lib="pico2-knob" part="ER-CON20HT-1">
+      <description>EastRising ER-CON20HT-1 20-pin 0.5mm SMD horizontal top-contact FFC/FPC/ZIF connector</description>
+      <docs>ER-CON20HT-1.pdf</docs>
+      <footprints>
+        <fp>Connector*:*_1x??_*</fp>
+      </footprints>
+      <fields>
+        <field name="Reference">J</field>
+        <field name="Value">ER-CON20HT-1</field>
+        <field name="Footprint">pico2-knob:ER-CON20HT-1</field>
+        <field name="Datasheet">ER-CON20HT-1.pdf</field>
+        <field name="Description">EastRising ER-CON20HT-1 20-pin 0.5mm SMD horizontal top-contact FFC/FPC/ZIF connector</field>
+      </fields>
+      <pins>
+        <pin num="1" name="Pin_1" type="passive"/>
+        <pin num="2" name="Pin_2" type="passive"/>
+        <pin num="3" name="Pin_3" type="passive"/>
+        <pin num="4" name="Pin_4" type="passive"/>
+        <pin num="5" name="Pin_5" type="passive"/>
+        <pin num="6" name="Pin_6" type="passive"/>
+        <pin num="7" name="Pin_7" type="passive"/>
+        <pin num="8" name="Pin_8" type="passive"/>
+        <pin num="9" name="Pin_9" type="passive"/>
+        <pin num="10" name="Pin_10" type="passive"/>
+        <pin num="11" name="Pin_11" type="passive"/>
+        <pin num="12" name="Pin_12" type="passive"/>
+        <pin num="13" name="Pin_13" type="passive"/>
+        <pin num="14" name="Pin_14" type="passive"/>
+        <pin num="15" name="Pin_15" type="passive"/>
+        <pin num="16" name="Pin_16" type="passive"/>
+        <pin num="17" name="Pin_17" type="passive"/>
+        <pin num="18" name="Pin_18" type="passive"/>
+        <pin num="19" name="Pin_19" type="passive"/>
+        <pin num="20" name="Pin_20" type="passive"/>
+      </pins>
+    </libpart>
+    <libpart lib="pico2-knob" part="ER-OLED1.12-2">
+      <description>EastRising ER-OLED1.12-2W 1.12in 128x128 SH1107 OLED module (20-pin FPC). Module symbol, no footprint; mates to ER-CON20HT-1.</description>
+      <docs>ER-OLED1.12-2_Datasheet.pdf</docs>
+      <fields>
+        <field name="Reference">DS</field>
+        <field name="Value">ER-OLED1.12-2</field>
+        <field name="Footprint"/>
+        <field name="Datasheet">ER-OLED1.12-2_Datasheet.pdf</field>
+        <field name="Description">EastRising ER-OLED1.12-2W 1.12in 128x128 SH1107 OLED module (20-pin FPC). Module symbol, no footprint; mates to ER-CON20HT-1.</field>
+      </fields>
+      <pins>
+        <pin num="1" name="VPP" type="power_in"/>
+        <pin num="2" name="VCOMH" type="passive"/>
+        <pin num="3" name="VDD" type="power_in"/>
+        <pin num="4" name="IM1" type="input"/>
+        <pin num="5" name="IM2" type="input"/>
+        <pin num="6" name="IREF" type="passive"/>
+        <pin num="7" name="CS#" type="input"/>
+        <pin num="8" name="RES#" type="input"/>
+        <pin num="9" name="A0" type="input"/>
+        <pin num="10" name="WR#" type="input"/>
+        <pin num="11" name="E/RD#" type="input"/>
+        <pin num="12" name="D0" type="bidirectional"/>
+        <pin num="13" name="D1" type="bidirectional"/>
+        <pin num="14" name="D2" type="bidirectional"/>
+        <pin num="15" name="D3" type="bidirectional"/>
+        <pin num="16" name="D4" type="bidirectional"/>
+        <pin num="17" name="D5" type="bidirectional"/>
+        <pin num="18" name="D6" type="bidirectional"/>
+        <pin num="19" name="D7" type="bidirectional"/>
+        <pin num="20" name="GND" type="power_in"/>
+      </pins>
+    </libpart>
+  </libparts>
+  <libraries>
+    <library logical="Connector">
+      <uri>${KICAD10_SYMBOL_DIR}/Connector.kicad_sym</uri>
+    </library>
+    <library logical="Connector_Generic">
+      <uri>${KICAD10_SYMBOL_DIR}/Connector_Generic.kicad_sym</uri>
+    </library>
+    <library logical="Device">
+      <uri>${KICAD10_SYMBOL_DIR}/Device.kicad_sym</uri>
+    </library>
+    <library logical="Regulator_Switching">
+      <uri>${KICAD10_SYMBOL_DIR}/Regulator_Switching.kicad_sym</uri>
+    </library>
+    <library logical="Switch">
+      <uri>${KICAD10_SYMBOL_DIR}/Switch.kicad_sym</uri>
+    </library>
+    <library logical="marbastlib-promicroish">
+      <uri>${KIPRJMOD}/../lib/marbastlib/symbols/marbastlib-promicroish.kicad_sym</uri>
+    </library>
+    <library logical="pico2-knob">
+      <uri>${KIPRJMOD}/pico2-knob.kicad_sym</uri>
+    </library>
+  </libraries>
+  <nets>
+    <net code="1" name="+3.3V" class="Default">
+      <node ref="DS1" pin="3" pinfunction="VDD_3" pintype="power_in"/>
+      <node ref="J3" pin="3" pinfunction="Pin_3_3" pintype="passive"/>
+      <node ref="TP3" pin="1" pinfunction="1_1" pintype="passive"/>
+      <node ref="U1" pin="16" pinfunction="3V3_16" pintype="power_out"/>
+    </net>
+    <net code="2" name="/BTN1" class="Default">
+      <node ref="SW1" pin="1" pinfunction="1_1" pintype="passive"/>
+      <node ref="U1" pin="8" pinfunction="P0.24_8" pintype="bidirectional"/>
+    </net>
+    <net code="3" name="/BTN2" class="Default">
+      <node ref="SW2" pin="1" pinfunction="1_1" pintype="passive"/>
+      <node ref="U1" pin="9" pinfunction="P1.00_9" pintype="bidirectional"/>
+    </net>
+    <net code="4" name="/BTN3" class="Default">
+      <node ref="SW3" pin="1" pinfunction="1_1" pintype="passive"/>
+      <node ref="U1" pin="10" pinfunction="P0.11_10" pintype="bidirectional"/>
+    </net>
+    <net code="5" name="/ENC_A" class="Default">
+      <node ref="RE1" pin="A" pinfunction="A_A" pintype="passive"/>
+      <node ref="U1" pin="24" pinfunction="P0.09-LF_24" pintype="bidirectional"/>
+    </net>
+    <net code="6" name="/ENC_B" class="Default">
+      <node ref="RE1" pin="B" pinfunction="B_B" pintype="passive"/>
+      <node ref="U1" pin="23" pinfunction="P0.10-LF_23" pintype="bidirectional"/>
+    </net>
+    <net code="7" name="/ENC_SW" class="Default">
+      <node ref="RE1" pin="S1" pinfunction="S1_S1" pintype="passive"/>
+      <node ref="U1" pin="12" pinfunction="P1.06-LF_12" pintype="bidirectional"/>
+    </net>
+    <net code="8" name="/IREF" class="Default">
+      <node ref="DS1" pin="6" pinfunction="IREF_6" pintype="passive"/>
+      <node ref="J3" pin="6" pinfunction="Pin_6_6" pintype="passive"/>
+      <node ref="R1" pin="1" pintype="passive"/>
+    </net>
+    <net code="9" name="/OLED_CS" class="Default">
+      <node ref="DS1" pin="7" pinfunction="CS#_7" pintype="input"/>
+      <node ref="J3" pin="7" pinfunction="Pin_7_7" pintype="passive"/>
+      <node ref="R2" pin="1" pintype="passive"/>
+    </net>
+    <net code="10" name="/OLED_DC" class="Default">
+      <node ref="DS1" pin="9" pinfunction="A0_9" pintype="input"/>
+      <node ref="J3" pin="9" pinfunction="Pin_9_9" pintype="passive"/>
+    </net>
+    <net code="11" name="/OLED_RES" class="Default">
+      <node ref="DS1" pin="8" pinfunction="RES#_8" pintype="input"/>
+      <node ref="J3" pin="8" pinfunction="Pin_8_8" pintype="passive"/>
+      <node ref="R6" pin="1" pintype="passive"/>
+    </net>
+    <net code="12" name="/OLED_SCLK" class="Default">
+      <node ref="DS1" pin="12" pinfunction="D0_12" pintype="bidirectional"/>
+      <node ref="J3" pin="12" pinfunction="Pin_12_12" pintype="passive"/>
+    </net>
+    <net code="13" name="/OLED_SDI" class="Default">
+      <node ref="DS1" pin="13" pinfunction="D1_13" pintype="bidirectional"/>
+      <node ref="J3" pin="13" pinfunction="Pin_13_13" pintype="passive"/>
+    </net>
+    <net code="14" name="/VBAT" class="Default">
+      <node ref="J2" pin="1" pinfunction="Pin_1_1" pintype="passive"/>
+      <node ref="U1" pin="13" pinfunction="BAT+_13" pintype="power_out"/>
+      <node ref="U1" pin="29" pinfunction="BAT+_29" pintype="passive"/>
+    </net>
+    <net code="15" name="/VCOMH" class="Default">
+      <node ref="C5" pin="1" pintype="passive"/>
+      <node ref="DS1" pin="2" pinfunction="VCOMH_2" pintype="passive"/>
+      <node ref="J3" pin="2" pinfunction="Pin_2_2" pintype="passive"/>
+    </net>
+    <net code="16" name="/VPP" class="Default">
+      <node ref="DS1" pin="1" pinfunction="VPP_1" pintype="power_in"/>
+      <node ref="J3" pin="1" pinfunction="Pin_1_1" pintype="passive"/>
+    </net>
+    <net code="17" name="GND" class="Default">
+      <node ref="C5" pin="2" pintype="passive"/>
+      <node ref="DS1" pin="4" pinfunction="IM1_4" pintype="input"/>
+      <node ref="J2" pin="2" pinfunction="Pin_2_2" pintype="passive"/>
+      <node ref="J3" pin="4" pinfunction="Pin_4_4" pintype="passive"/>
+      <node ref="R1" pin="2" pintype="passive"/>
+      <node ref="R2" pin="2" pintype="passive"/>
+      <node ref="R6" pin="2" pintype="passive"/>
+      <node ref="RE1" pin="C" pinfunction="C_C" pintype="passive"/>
+      <node ref="RE1" pin="S2" pinfunction="S2_S2" pintype="passive"/>
+      <node ref="SW1" pin="2" pinfunction="2_2" pintype="passive"/>
+      <node ref="SW2" pin="2" pinfunction="2_2" pintype="passive"/>
+      <node ref="SW3" pin="2" pinfunction="2_2" pintype="passive"/>
+      <node ref="U1" pin="14" pinfunction="GND_14" pintype="passive"/>
+      <node ref="U1" pin="28" pinfunction="GND_28" pintype="passive"/>
+      <node ref="U1" pin="4" pinfunction="GND_4" pintype="passive"/>
+    </net>
+    <net code="18" name="Net-(DS1-E/RD#)" class="Default">
+      <node ref="DS1" pin="11" pinfunction="E/RD#_11" pintype="input"/>
+      <node ref="J3" pin="11" pinfunction="Pin_11_11" pintype="passive"/>
+    </net>
+    <net code="19" name="Net-(DS1-GND)" class="Default">
+      <node ref="C4" pin="1" pintype="passive"/>
+      <node ref="DS1" pin="20" pinfunction="GND_20" pintype="power_in"/>
+      <node ref="J3" pin="20" pinfunction="Pin_20_20" pintype="passive"/>
+    </net>
+    <net code="20" name="Net-(DS1-IM2)" class="Default">
+      <node ref="DS1" pin="5" pinfunction="IM2_5" pintype="input"/>
+      <node ref="J3" pin="5" pinfunction="Pin_5_5" pintype="passive"/>
+    </net>
+    <net code="21" name="Net-(DS1-WR#)" class="Default">
+      <node ref="DS1" pin="10" pinfunction="WR#_10" pintype="input"/>
+      <node ref="J3" pin="10" pinfunction="Pin_10_10" pintype="passive"/>
+    </net>
+    <net code="22" name="unconnected-(C1-Pad1)" class="Default">
+      <node ref="C1" pin="1" pintype="passive"/>
+    </net>
+    <net code="23" name="unconnected-(C1-Pad2)" class="Default">
+      <node ref="C1" pin="2" pintype="passive"/>
+    </net>
+    <net code="24" name="unconnected-(C2-Pad1)" class="Default">
+      <node ref="C2" pin="1" pintype="passive"/>
+    </net>
+    <net code="25" name="unconnected-(C2-Pad2)" class="Default">
+      <node ref="C2" pin="2" pintype="passive"/>
+    </net>
+    <net code="26" name="unconnected-(C3-Pad1)" class="Default">
+      <node ref="C3" pin="1" pintype="passive"/>
+    </net>
+    <net code="27" name="unconnected-(C3-Pad2)" class="Default">
+      <node ref="C3" pin="2" pintype="passive"/>
+    </net>
+    <net code="28" name="unconnected-(C4-Pad2)" class="Default">
+      <node ref="C4" pin="2" pintype="passive"/>
+    </net>
+    <net code="29" name="unconnected-(D1-A-Pad2)" class="Default">
+      <node ref="D1" pin="2" pinfunction="A_2" pintype="passive"/>
+    </net>
+    <net code="30" name="unconnected-(D1-K-Pad1)" class="Default">
+      <node ref="D1" pin="1" pinfunction="K_1" pintype="passive"/>
+    </net>
+    <net code="31" name="unconnected-(DS1-D2-Pad14)" class="Default">
+      <node ref="DS1" pin="14" pinfunction="D2_14" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="32" name="unconnected-(DS1-D3-Pad15)" class="Default">
+      <node ref="DS1" pin="15" pinfunction="D3_15" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="33" name="unconnected-(DS1-D4-Pad16)" class="Default">
+      <node ref="DS1" pin="16" pinfunction="D4_16" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="34" name="unconnected-(DS1-D5-Pad17)" class="Default">
+      <node ref="DS1" pin="17" pinfunction="D5_17" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="35" name="unconnected-(DS1-D6-Pad18)" class="Default">
+      <node ref="DS1" pin="18" pinfunction="D6_18" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="36" name="unconnected-(DS1-D7-Pad19)" class="Default">
+      <node ref="DS1" pin="19" pinfunction="D7_19" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="37" name="unconnected-(J3-Pin_14-Pad14)" class="Default">
+      <node ref="J3" pin="14" pinfunction="Pin_14_14" pintype="passive+no_connect"/>
+    </net>
+    <net code="38" name="unconnected-(J3-Pin_15-Pad15)" class="Default">
+      <node ref="J3" pin="15" pinfunction="Pin_15_15" pintype="passive+no_connect"/>
+    </net>
+    <net code="39" name="unconnected-(J3-Pin_16-Pad16)" class="Default">
+      <node ref="J3" pin="16" pinfunction="Pin_16_16" pintype="passive+no_connect"/>
+    </net>
+    <net code="40" name="unconnected-(J3-Pin_17-Pad17)" class="Default">
+      <node ref="J3" pin="17" pinfunction="Pin_17_17" pintype="passive+no_connect"/>
+    </net>
+    <net code="41" name="unconnected-(J3-Pin_18-Pad18)" class="Default">
+      <node ref="J3" pin="18" pinfunction="Pin_18_18" pintype="passive+no_connect"/>
+    </net>
+    <net code="42" name="unconnected-(J3-Pin_19-Pad19)" class="Default">
+      <node ref="J3" pin="19" pinfunction="Pin_19_19" pintype="passive+no_connect"/>
+    </net>
+    <net code="43" name="unconnected-(L1-Pad1)" class="Default">
+      <node ref="L1" pin="1" pinfunction="1_1" pintype="passive"/>
+    </net>
+    <net code="44" name="unconnected-(L1-Pad2)" class="Default">
+      <node ref="L1" pin="2" pinfunction="2_2" pintype="passive"/>
+    </net>
+    <net code="45" name="unconnected-(R3-Pad1)" class="Default">
+      <node ref="R3" pin="1" pintype="passive"/>
+    </net>
+    <net code="46" name="unconnected-(R3-Pad2)" class="Default">
+      <node ref="R3" pin="2" pintype="passive"/>
+    </net>
+    <net code="47" name="unconnected-(R4-Pad1)" class="Default">
+      <node ref="R4" pin="1" pintype="passive"/>
+    </net>
+    <net code="48" name="unconnected-(R4-Pad2)" class="Default">
+      <node ref="R4" pin="2" pintype="passive"/>
+    </net>
+    <net code="49" name="unconnected-(R5-Pad1)" class="Default">
+      <node ref="R5" pin="1" pintype="passive"/>
+    </net>
+    <net code="50" name="unconnected-(R5-Pad2)" class="Default">
+      <node ref="R5" pin="2" pintype="passive"/>
+    </net>
+    <net code="51" name="unconnected-(TP1-Pad1)" class="Default">
+      <node ref="TP1" pin="1" pinfunction="1_1" pintype="passive"/>
+    </net>
+    <net code="52" name="unconnected-(TP2-Pad1)" class="Default">
+      <node ref="TP2" pin="1" pinfunction="1_1" pintype="passive"/>
+    </net>
+    <net code="53" name="unconnected-(U1-GND-Pad3)" class="Default">
+      <node ref="U1" pin="3" pinfunction="GND_3" pintype="power_out"/>
+    </net>
+    <net code="54" name="unconnected-(U1-P0.02-LF-Pad19)" class="Default">
+      <node ref="U1" pin="19" pinfunction="P0.02-LF_19" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="55" name="unconnected-(U1-P0.06-Pad1)" class="Default">
+      <node ref="U1" pin="1" pinfunction="P0.06_1" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="56" name="unconnected-(U1-P0.08-Pad2)" class="Default">
+      <node ref="U1" pin="2" pinfunction="P0.08_2" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="57" name="unconnected-(U1-P0.17-Pad5)" class="Default">
+      <node ref="U1" pin="5" pinfunction="P0.17_5" pintype="bidirectional"/>
+    </net>
+    <net code="58" name="unconnected-(U1-P0.20-Pad6)" class="Default">
+      <node ref="U1" pin="6" pinfunction="P0.20_6" pintype="bidirectional"/>
+    </net>
+    <net code="59" name="unconnected-(U1-P0.22-Pad7)" class="Default">
+      <node ref="U1" pin="7" pinfunction="P0.22_7" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="60" name="unconnected-(U1-P0.29-LF-Pad18)" class="Default">
+      <node ref="U1" pin="18" pinfunction="P0.29-LF_18" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="61" name="unconnected-(U1-P0.31-LF-Pad17)" class="Default">
+      <node ref="U1" pin="17" pinfunction="P0.31-LF_17" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="62" name="unconnected-(U1-P1.01-LF-Pad25)" class="Default">
+      <node ref="U1" pin="25" pinfunction="P1.01-LF_25" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="63" name="unconnected-(U1-P1.02-LF-Pad26)" class="Default">
+      <node ref="U1" pin="26" pinfunction="P1.02-LF_26" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="64" name="unconnected-(U1-P1.04-LF-Pad11)" class="Default">
+      <node ref="U1" pin="11" pinfunction="P1.04-LF_11" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="65" name="unconnected-(U1-P1.07-LF-Pad27)" class="Default">
+      <node ref="U1" pin="27" pinfunction="P1.07-LF_27" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="66" name="unconnected-(U1-P1.11-LF-Pad22)" class="Default">
+      <node ref="U1" pin="22" pinfunction="P1.11-LF_22" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="67" name="unconnected-(U1-P1.13-LF-Pad21)" class="Default">
+      <node ref="U1" pin="21" pinfunction="P1.13-LF_21" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="68" name="unconnected-(U1-P1.15-LF-Pad20)" class="Default">
+      <node ref="U1" pin="20" pinfunction="P1.15-LF_20" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="69" name="unconnected-(U1-RST-Pad15)" class="Default">
+      <node ref="U1" pin="15" pinfunction="RST_15" pintype="bidirectional+no_connect"/>
+    </net>
+    <net code="70" name="unconnected-(U2-DC-Pad8)" class="Default">
+      <node ref="U2" pin="8" pinfunction="DC_8" pintype="open_collector"/>
+    </net>
+    <net code="71" name="unconnected-(U2-GND-Pad4)" class="Default">
+      <node ref="U2" pin="4" pinfunction="GND_4" pintype="power_in"/>
+    </net>
+    <net code="72" name="unconnected-(U2-Ipk-Pad7)" class="Default">
+      <node ref="U2" pin="7" pinfunction="Ipk_7" pintype="input"/>
+    </net>
+    <net code="73" name="unconnected-(U2-SwC-Pad1)" class="Default">
+      <node ref="U2" pin="1" pinfunction="SwC_1" pintype="open_collector"/>
+    </net>
+    <net code="74" name="unconnected-(U2-SwE-Pad2)" class="Default">
+      <node ref="U2" pin="2" pinfunction="SwE_2" pintype="open_emitter"/>
+    </net>
+    <net code="75" name="unconnected-(U2-TC-Pad3)" class="Default">
+      <node ref="U2" pin="3" pinfunction="TC_3" pintype="passive"/>
+    </net>
+    <net code="76" name="unconnected-(U2-Vfb-Pad5)" class="Default">
+      <node ref="U2" pin="5" pinfunction="Vfb_5" pintype="input"/>
+    </net>
+    <net code="77" name="unconnected-(U2-Vin-Pad6)" class="Default">
+      <node ref="U2" pin="6" pinfunction="Vin_6" pintype="power_in"/>
+    </net>
+  </nets>
+</export>

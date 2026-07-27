@@ -22,6 +22,7 @@ MODEL_DIR = "${KIPRJMOD}/../mechanical/step/"
 TRANSFORMS = {
     "RE1": ("encoder.step",  (7.5, -2.5, 0.0), (0, 0, 90)),   # shaft -> footprint origin
     "U1":  ("nicenano.step", (0.0,  0.0, 8.5), (0, 0, 90)),   # back side; +8.5mm socket standoff
+    "L1":  ("inductor.step", (0.0,  0.0, 0.0), (0, 0, 0)),    # Coilcraft MSS1260 (12.3x12.3x6.0) for L_12x12mm_H6mm
     # OLED is now off-board (ER-OLED1.12-2 via the FPC J3/J4), so oled.step/J1 is dropped.
 }
 
