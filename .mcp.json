@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "konnect": {
+      "command": "/home/thebu/newhome/projects/konnect/target/release/konnect",
+      "args": [],
+      "env": {
+        "KICAD_API_SOCKET": "ipc:///tmp/kicad/api.sock"
+      }
+    }
+  }
+}

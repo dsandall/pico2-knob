@@ -1,0 +1,5 @@
+# Konnect MCP server config (picked up from cwd at launch).
+# Workaround for missing Linux socket default: pin KiCad 10's IPC socket path.
+ipc_address = "ipc:///tmp/kicad/api.sock"
+transport = "stdio"
+log_level = "info"
