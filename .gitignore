@@ -46,4 +46,4 @@ lib/marbastlib/symbols/*
 .venv/
 *.pyc
 
-
+**/.history
