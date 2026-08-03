@@ -4535,12 +4535,6 @@
 		(uuid "1ee246c3-38fc-4957-88d2-910d9f9103be")
 	)
 	(junction
-		(at 231.14 137.16)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "206c4803-56eb-40b8-bc34-91c2b43d5c8a")
-	)
-	(junction
 		(at 237.49 88.9)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -4601,12 +4595,6 @@
 		(uuid "63879301-b05d-45eb-b2b4-2497b0c645ff")
 	)
 	(junction
-		(at 166.37 119.38)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "6491a62e-b9d8-4c12-8393-5a196b99bcee")
-	)
-	(junction
 		(at 168.91 161.29)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -4619,16 +4607,16 @@
 		(uuid "684813c0-951a-48c3-b464-c8b90fb35ebe")
 	)
 	(junction
-		(at 260.35 137.16)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "6d179153-da40-4a3f-881e-dd6c6e2fa744")
-	)
-	(junction
 		(at 208.28 120.65)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "6f91a924-bc5d-45a4-b235-b29cb10afcab")
+	)
+	(junction
+		(at 231.14 137.16)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "73f8a2a2-44d2-4d14-9ebf-c0b1eb2da318")
 	)
 	(junction
 		(at 20.32 66.04)
@@ -4727,6 +4715,12 @@
 		(uuid "d0a43b16-8021-47d6-aff3-63980038d93f")
 	)
 	(junction
+		(at 177.8 156.21)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "d0d4d2b6-1fce-4f74-a1c8-90f48275141d")
+	)
+	(junction
 		(at 71.12 66.04)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -4739,22 +4733,10 @@
 		(uuid "d55e7c4d-4ba1-4aa3-8ac1-b414be2cf950")
 	)
 	(junction
-		(at 177.8 158.75)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "e51986bf-fcb8-40dc-8473-57ebce12fd2f")
-	)
-	(junction
 		(at 237.49 40.64)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "eb11a067-0c5b-4ea3-ba85-32e7af9c7bc2")
-	)
-	(junction
-		(at 260.35 129.54)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "f68648c6-6b56-4c86-a583-8b4cdb26fbf3")
 	)
 	(junction
 		(at 218.44 137.16)
@@ -4771,8 +4753,24 @@
 		(uuid "36a4828b-52fc-4f30-a056-89589f381b21")
 	)
 	(no_connect
+		(at 29.21 81.28)
+		(uuid "3bf0e4ed-fecc-4945-a267-50ae91bb8cd1")
+	)
+	(no_connect
 		(at 238.76 83.82)
 		(uuid "42da7727-4394-4886-94a8-b05e953a1e5c")
+	)
+	(no_connect
+		(at 29.21 93.98)
+		(uuid "546add5c-ea13-435d-b51a-dad732de9d02")
+	)
+	(no_connect
+		(at 67.31 81.28)
+		(uuid "594363da-e45b-4d9c-b1e7-399f27a2cf0e")
+	)
+	(no_connect
+		(at 29.21 88.9)
+		(uuid "6e2feb70-add7-4d74-8a4a-7ca6a3bb32c1")
 	)
 	(no_connect
 		(at 238.76 78.74)
@@ -4783,12 +4781,20 @@
 		(uuid "8506f11d-98b8-4aa7-a930-519d3fc6017c")
 	)
 	(no_connect
+		(at 29.21 91.44)
+		(uuid "b3b893f8-dd6d-4cc3-a554-9ab8488f4b8f")
+	)
+	(no_connect
 		(at 236.22 83.82)
 		(uuid "c1d1eafc-3135-4cc6-9329-4c5457544a76")
 	)
 	(no_connect
 		(at 236.22 78.74)
 		(uuid "d05525ae-a604-4acb-86e8-2dd738438687")
+	)
+	(no_connect
+		(at 67.31 88.9)
+		(uuid "d446dc7c-7f90-473a-b391-1b102cef07f7")
 	)
 	(no_connect
 		(at 67.31 73.66)
@@ -5016,16 +5022,6 @@
 	)
 	(wire
 		(pts
-			(xy 231.14 137.16) (xy 260.35 137.16)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "25d1bce1-18bc-4ce6-8878-d108472d71da")
-	)
-	(wire
-		(pts
 			(xy 144.78 135.89) (xy 151.13 135.89)
 		)
 		(stroke
@@ -5116,6 +5112,16 @@
 	)
 	(wire
 		(pts
+			(xy 243.84 137.16) (xy 231.14 137.16)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "37a223ed-8db0-48d4-86b2-8d7dbf575788")
+	)
+	(wire
+		(pts
 			(xy 208.28 133.35) (xy 208.28 134.62)
 		)
 		(stroke
@@ -5183,6 +5189,16 @@
 			(type default)
 		)
 		(uuid "4245bf2b-903c-4b11-b5ad-0f57f087f060")
+	)
+	(wire
+		(pts
+			(xy 243.84 128.27) (xy 243.84 137.16)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "432be841-d8c6-47d7-a5aa-7f2e99f98370")
 	)
 	(wire
 		(pts
@@ -5313,16 +5329,6 @@
 			(type default)
 		)
 		(uuid "50fe95df-190f-484d-ba08-13f0444fb444")
-	)
-	(wire
-		(pts
-			(xy 260.35 137.16) (xy 260.35 129.54)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "536560cd-ba2c-4a9d-b06f-96c628e549e8")
 	)
 	(wire
 		(pts
@@ -5506,6 +5512,16 @@
 	)
 	(wire
 		(pts
+			(xy 260.35 128.27) (xy 243.84 128.27)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "7c4d5829-6851-48c8-b82e-2ebc9fc74568")
+	)
+	(wire
+		(pts
 			(xy 177.8 143.51) (xy 177.8 142.24)
 		)
 		(stroke
@@ -5553,6 +5569,16 @@
 			(type default)
 		)
 		(uuid "82421dd9-4aea-445c-83d0-bf44dccd3f04")
+	)
+	(wire
+		(pts
+			(xy 177.8 156.21) (xy 177.8 158.75)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "8401fbd2-2787-4db5-bcff-de1f59e19447")
 	)
 	(wire
 		(pts
@@ -5726,7 +5752,7 @@
 	)
 	(wire
 		(pts
-			(xy 191.77 158.75) (xy 177.8 158.75)
+			(xy 191.77 156.21) (xy 177.8 156.21)
 		)
 		(stroke
 			(width 0)
@@ -5966,7 +5992,7 @@
 	)
 	(wire
 		(pts
-			(xy 177.8 151.13) (xy 177.8 158.75)
+			(xy 177.8 151.13) (xy 177.8 156.21)
 		)
 		(stroke
 			(width 0)
@@ -6046,23 +6072,13 @@
 	)
 	(wire
 		(pts
-			(xy 191.77 149.86) (xy 191.77 158.75)
+			(xy 191.77 149.86) (xy 191.77 156.21)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "d3277e04-6a26-4dec-86c2-d190874f06f6")
-	)
-	(wire
-		(pts
-			(xy 166.37 121.92) (xy 166.37 119.38)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "d350ce06-7416-4ce9-a78a-8d7e31254f15")
 	)
 	(wire
 		(pts
@@ -6789,6 +6805,84 @@
 		)
 	)
 	(symbol
+		(lib_id "power:+12V")
+		(at 129.54 48.26 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "17b26bbb-73f0-435b-9d88-ef01d4121524")
+		(property "Reference" "#PWR019"
+			(at 129.54 52.07 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "+12V"
+			(at 129.54 43.18 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 129.54 48.26 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 129.54 48.26 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+12V\""
+			(at 129.54 48.26 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "687fd774-fddb-4368-9e9c-29bb61137d84")
+		)
+		(instances
+			(project "pico2-knob"
+				(path "/dbcb8cfe-f4da-4f0e-94be-1af05accddbf"
+					(reference "#PWR019")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:GND")
 		(at 35.56 127 0)
 		(unit 1)
@@ -6954,84 +7048,6 @@
 			(project "pico2-knob"
 				(path "/dbcb8cfe-f4da-4f0e-94be-1af05accddbf"
 					(reference "R3")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "power:+12V")
-		(at 139.7 50.8 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "382b0de5-03c5-4118-ae1c-3ebaa7d8455e")
-		(property "Reference" "#PWR019"
-			(at 139.7 54.61 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "+12V"
-			(at 139.7 45.72 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 139.7 50.8 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 139.7 50.8 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"+12V\""
-			(at 139.7 50.8 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "717ab080-9581-4dbd-b16c-58e5f1bf63ed")
-		)
-		(instances
-			(project "pico2-knob"
-				(path "/dbcb8cfe-f4da-4f0e-94be-1af05accddbf"
-					(reference "#PWR019")
 					(unit 1)
 				)
 			)
@@ -9207,6 +9223,84 @@
 			(project "pico2-knob"
 				(path "/dbcb8cfe-f4da-4f0e-94be-1af05accddbf"
 					(reference "R2")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Connector:TestPoint")
+		(at 129.54 48.26 180)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "98c327c2-4c5c-4e66-a83b-21d1db614900")
+		(property "Reference" "TP4"
+			(at 128.016 52.578 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "+12V"
+			(at 128.016 50.038 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "TestPoint:TestPoint_Pad_D1.5mm"
+			(at 124.46 48.26 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 124.46 48.26 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "test point"
+			(at 129.54 48.26 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "1b50005d-9f58-4258-a4a8-26b85f320a72")
+		)
+		(instances
+			(project "pico2-knob"
+				(path "/dbcb8cfe-f4da-4f0e-94be-1af05accddbf"
+					(reference "TP4")
 					(unit 1)
 				)
 			)
@@ -11449,84 +11543,6 @@
 			(project "pico2-knob"
 				(path "/dbcb8cfe-f4da-4f0e-94be-1af05accddbf"
 					(reference "U2")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Connector:TestPoint")
-		(at 139.7 50.8 180)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "f398a17d-1a03-44d5-a7e1-443afdede525")
-		(property "Reference" "TP4"
-			(at 138.176 55.118 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Value" "+12V"
-			(at 138.176 52.578 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify left)
-			)
-		)
-		(property "Footprint" "TestPoint:TestPoint_Pad_D1.5mm"
-			(at 134.62 50.8 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 134.62 50.8 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "test point"
-			(at 139.7 50.8 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "a46aa2b3-e6f0-433e-b89b-4cdea94b8623")
-		)
-		(instances
-			(project "pico2-knob"
-				(path "/dbcb8cfe-f4da-4f0e-94be-1af05accddbf"
-					(reference "TP4")
 					(unit 1)
 				)
 			)
