@@ -1,7 +1,8 @@
 
 
 # freerouting.jar (58 MB) — re-download from github releases
-tools/
+# (anchored: firmware/tools/ holds checked-in host-side scripts)
+/tools/
 
 # KiCad transient / per-user
 *-bak
@@ -47,3 +48,7 @@ lib/marbastlib/symbols/*
 *.pyc
 
 **/.history
+
+# firmware build output
+firmware/target/
+firmware/out/

@@ -1,0 +1,11 @@
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+# `cargo run --release` builds, packages a UF2, reboots the board into its
+# bootloader and copies it across. MONITOR=1 also attaches picocom.
+runner = "./flash.sh"
+# flip-link puts the stack below .bss/.data so a stack overflow faults instead of
+# silently corrupting statics. Swap for "rust-lld -flavor gnu" if it's not installed.
+linker = "flip-link"
+rustflags = ["-C", "link-arg=-Tlink.x"]
