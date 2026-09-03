@@ -26,6 +26,12 @@ case "$ORIGIN" in
   *)        NAME=pico2joy-bringup-0x$ORIGIN ;;
 esac
 
+# Ask the ELF which radio it has rather than trusting a flag, so the two builds
+# can never overwrite each other's UF2.
+if rust-nm "$ELF" 2>/dev/null | grep -qi "sdc_init\|mpsl_init"; then
+  NAME="$NAME-ble"
+fi
+
 rust-objcopy -O ihex "$ELF" "$OUT/$NAME.hex"
 rust-objcopy -O binary "$ELF" "$OUT/$NAME.bin"
 cargo-hex-to-uf2 hex-to-uf2 -i "$OUT/$NAME.hex" -o "$OUT/$NAME.uf2" -f nrf52840

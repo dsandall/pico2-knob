@@ -6,13 +6,35 @@ description = "Bring-up firmware for the pico2-knob / pico2joy puck (nice!nano v
 license = "MIT OR Apache-2.0"
 
 [features]
-default = []
+default = ["cs-single-core"]
+
+# Critical sections: the plain single-core implementation is right for the USB-only
+# build, but MPSL needs its own (blanket interrupt masking would wreck radio
+# timing). They are mutually exclusive, hence a feature for each and
+# `--no-default-features --features ble` for the radio build - see ble.sh.
+cs-single-core = ["cortex-m/critical-section-single-core"]
+
+# Connectable BLE link: trouble-host on the Nordic SoftDevice Controller. Takes
+# over RADIO, so it replaces the raw advertiser in src/radio.rs rather than
+# joining it.
+ble = [
+    "dep:nrf-mpsl",
+    "dep:nrf-sdc",
+    "dep:trouble-host",
+    "dep:static_cell",
+    "nrf-mpsl/critical-section-impl",
+]
 # Link the app at 0x001000 instead of 0x026000 (i.e. over the SoftDevice slot).
 # Only needed if the installed UF2 bootloader has no SoftDevice; see README.
 app-offset-1000 = []
+trouble-host = ["dep:trouble-host"]
+nrf-sdc = ["dep:nrf-sdc"]
+nrf-mpsl = ["dep:nrf-mpsl"]
+static_cell = ["dep:static_cell"]
+rand_core = []
 
 [dependencies]
-cortex-m = { version = "0.7.9", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m = { version = "0.7.9", features = ["inline-asm"] }
 cortex-m-rt = "0.7.6"
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
 embassy-futures = "0.1.2"
@@ -28,7 +50,16 @@ embassy-time = "0.5.1"
 embassy-usb = "0.6.0"
 embedded-graphics = "0.8.2"
 heapless = "0.9.3"
+nrf-mpsl = { version = "0.4.0", optional = true, default-features = false, features = ["nrf52840"] }
+nrf-sdc = { version = "0.4.0", optional = true, default-features = false, features = ["nrf52840", "peripheral"] }
 panic-halt = "1.0.0"
+static_cell = { version = "2.1.1", optional = true }
+trouble-host = { version = "0.8.0", optional = true, default-features = false, features = [
+    "peripheral",
+    "gatt",
+    "derive",
+    "default-packet-pool",
+] }
 
 [profile.release]
 codegen-units = 1

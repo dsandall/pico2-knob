@@ -16,6 +16,8 @@ use embassy_futures::yield_now;
 use embassy_nrf::pac;
 use embassy_nrf::pac::radio::vals;
 
+use crate::state::{Payload, device_address};
+
 /// The access address every BLE advertising packet uses, and the CRC the spec
 /// fixes alongside it.
 const ADV_ACCESS_ADDRESS: u32 = 0x8E89_BED6;
@@ -38,47 +40,21 @@ const COMPANY_ID: u16 = 0xFFFF;
 
 pub const LOCAL_NAME: &[u8] = b"pico2joy";
 
-/// What each advertisement carries after the company ID. Little-endian, and
-/// versioned by `FORMAT` so the host script can refuse to guess.
-pub const FORMAT: u8 = 1;
-
-pub struct Payload {
-    pub buttons: u8,
-    pub detents: i16,
-    pub uptime_s: u16,
-    /// bit0: VPP rail enabled. bit1: display initialised.
-    pub flags: u8,
-}
-
+/// The payload below the company ID is [`crate::state::Payload`], so the
+/// advertisement and the connectable link speak the same bytes.
 /// One advertising PDU, laid out the way RADIO's EasyDMA wants to read it:
 /// S0 (the PDU header byte), then LENGTH, then that many payload bytes.
 #[repr(align(4))]
 pub struct Adv {
     buf: [u8; 39],
     address: [u8; 6],
-    seq: u8,
 }
 
 impl Adv {
-    /// Derives a random static address from FICR.DEVICEADDR: stable for this
-    /// board, unique between boards, with the top two bits the spec demands.
     pub fn new() -> Self {
-        let lo = pac::FICR.deviceaddr(0).read();
-        let hi = pac::FICR.deviceaddr(1).read();
-        let mut address = [
-            lo as u8,
-            (lo >> 8) as u8,
-            (lo >> 16) as u8,
-            (lo >> 24) as u8,
-            hi as u8,
-            (hi >> 8) as u8,
-        ];
-        address[5] |= 0xC0;
-
         Self {
             buf: [0; 39],
-            address,
-            seq: 0,
+            address: device_address(),
         }
     }
 
@@ -88,6 +64,7 @@ impl Adv {
 
     /// Rebuild the PDU around a fresh state snapshot.
     pub fn update(&mut self, state: &Payload) {
+        let encoded = state.encode();
         self.buf[0] = PDU_ADV_NONCONN_IND | PDU_TX_ADD_RANDOM;
         self.buf[2..8].copy_from_slice(&self.address);
         let mut at = 8;
@@ -105,27 +82,16 @@ impl Adv {
         name[1..1 + LOCAL_NAME.len()].copy_from_slice(LOCAL_NAME);
         push(&name[..1 + LOCAL_NAME.len()]);
 
-        let detents = state.detents.to_le_bytes();
-        let uptime = state.uptime_s.to_le_bytes();
         let company = COMPANY_ID.to_le_bytes();
-        push(&[
-            AD_MANUFACTURER_DATA,
-            company[0],
-            company[1],
-            FORMAT,
-            self.seq,
-            state.buttons,
-            detents[0],
-            detents[1],
-            uptime[0],
-            uptime[1],
-            state.flags,
-        ]);
+        let mut mfg = [0u8; 3 + crate::state::ENCODED_LEN];
+        mfg[0] = AD_MANUFACTURER_DATA;
+        mfg[1..3].copy_from_slice(&company);
+        mfg[3..].copy_from_slice(&encoded);
+        push(&mfg);
 
         // LENGTH covers AdvA plus the AD structures, and never the two bytes of
         // header that precede it.
         self.buf[1] = (at - 2) as u8;
-        self.seq = self.seq.wrapping_add(1);
     }
 
     /// Send the current PDU once on each advertising channel.

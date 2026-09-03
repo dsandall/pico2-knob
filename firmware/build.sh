@@ -12,7 +12,10 @@ for arg in "$@"; do
   case "$arg" in
     --flash) FLASH=1 ;;
     --offset-1000) FEATURES+=(--features app-offset-1000); NAME=pico2joy-bringup-0x1000 ;;
-    *) echo "usage: $0 [--flash] [--offset-1000]" >&2; exit 2 ;;
+    # The BLE build needs MPSL's critical-section implementation instead of the
+    # single-core one, which means dropping the default features.
+    --ble) FEATURES+=(--no-default-features --features ble); NAME=pico2joy-bringup-ble ;;
+    *) echo "usage: $0 [--flash] [--ble] [--offset-1000]" >&2; exit 2 ;;
   esac
 done
 

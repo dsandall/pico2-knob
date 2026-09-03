@@ -33,8 +33,12 @@
 #![no_std]
 #![no_main]
 
+#[cfg(feature = "ble")]
+mod ble;
 mod display;
+#[cfg(not(feature = "ble"))]
 mod radio;
+mod state;
 mod ui;
 
 use core::fmt::Write as _;
@@ -45,7 +49,10 @@ use embassy_nrf::config::HfclkSource;
 use embassy_nrf::gpio::{Flex, Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::{DutyCycle, SimpleConfig, SimplePwm};
 use embassy_nrf::spim::{self, Spim};
+#[cfg(not(feature = "ble"))]
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
+#[cfg(feature = "ble")]
+use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{bind_interrupts, peripherals};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -54,12 +61,15 @@ use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, Sender, State};
 use embassy_usb::{Builder, Config};
 use heapless::String;
-use panic_halt as _;
 
 use crate::display::Display;
 
+// In the `ble` build, CLOCK_POWER belongs to MPSL (see `ble::Irqs`), so USB
+// gives up hardware VBUS detection and is told it is plugged in - which it is,
+// or the console wouldn't be there to read.
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
+    #[cfg(not(feature = "ble"))]
     CLOCK_POWER => usb::vbus_detect::InterruptHandler;
     SPIM3 => spim::InterruptHandler<peripherals::SPI3>;
 });
@@ -100,7 +110,10 @@ static VPP_ON: AtomicBool = AtomicBool::new(false);
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 /// 0 = dark, 1 = dim heartbeat, 2 = full on (for finding the board).
 static LED_MODE: AtomicU8 = AtomicU8::new(1);
-static RADIO_ON: AtomicBool = AtomicBool::new(true);
+/// The raw advertiser is harmless, so it self-starts. The BLE stack waits for
+/// 'w' - see the note in `ble::run`.
+static RADIO_ON: AtomicBool = AtomicBool::new(!cfg!(feature = "ble"));
+static SEQ: AtomicU8 = AtomicU8::new(0);
 static REQ_HELP: AtomicBool = AtomicBool::new(false);
 static REQ_PINS: AtomicBool = AtomicBool::new(false);
 static REQ_BOOST: AtomicBool = AtomicBool::new(false);
@@ -109,6 +122,17 @@ static REQ_REINIT: AtomicBool = AtomicBool::new(false);
 static REQ_FLIP: AtomicBool = AtomicBool::new(false);
 static REQ_BRIGHTER: AtomicBool = AtomicBool::new(false);
 static REQ_DIMMER: AtomicBool = AtomicBool::new(false);
+
+/// One state snapshot for whichever radio is built in.
+fn snapshot() -> state::Payload {
+    state::Payload {
+        seq: SEQ.fetch_add(1, Ordering::Relaxed),
+        buttons: PRESSED.load(Ordering::Relaxed),
+        detents: DETENTS.load(Ordering::Relaxed) as i16,
+        uptime_s: Instant::now().as_secs() as u16,
+        flags: VPP_ON.load(Ordering::Relaxed) as u8,
+    }
+}
 
 fn log_fmt(args: core::fmt::Arguments) {
     let mut line: Line = String::new();
@@ -120,6 +144,7 @@ fn log_fmt(args: core::fmt::Arguments) {
     let _ = LOG.try_send(line);
 }
 
+#[macro_export]
 macro_rules! logln {
     ($($arg:tt)*) => { crate::log_fmt(format_args!($($arg)*)) };
 }
@@ -172,7 +197,20 @@ async fn main(_spawner: embassy_executor::Spawner) {
     // has the 32 MHz crystal. (Enabling `nfc-pins-as-gpio` also makes the first boot
     // after flashing write UICR and reset once - that is expected.)
     config.hfclk_source = HfclkSource::ExternalXtal;
+    // MPSL puts RADIO/RTC0/TIMER0 at P0 and expects nothing else to compete;
+    // the app's own interrupts sit below it in the ble build.
+    #[cfg(feature = "ble")]
+    {
+        config.time_interrupt_priority = embassy_nrf::interrupt::Priority::P2;
+    }
     let p = embassy_nrf::init(config);
+    #[cfg(feature = "ble")]
+    {
+        use embassy_nrf::interrupt::{self, InterruptExt};
+        interrupt::USBD.set_priority(interrupt::Priority::P2);
+        interrupt::SPIM3.set_priority(interrupt::Priority::P2);
+        interrupt::RNG.set_priority(interrupt::Priority::P2);
+    }
 
     // The 3V3 pad (OLED VDD, and the R2/R6 pull-ups) sits behind a load switch on
     // P0.13. Nothing on the puck outside the module is powered until this is high.
@@ -203,7 +241,13 @@ async fn main(_spawner: embassy_executor::Spawner) {
     ];
 
     // ---- USB CDC-ACM ----
+    #[cfg(not(feature = "ble"))]
     let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
+    #[cfg(feature = "ble")]
+    let driver = {
+        static VBUS: static_cell::StaticCell<SoftwareVbusDetect> = static_cell::StaticCell::new();
+        Driver::new(p.USBD, Irqs, VBUS.init(SoftwareVbusDetect::new(true, true)) as &_)
+    };
     let mut usb_config = Config::new(0x1209, 0x0001); // pid.codes prototype VID/PID
     usb_config.manufacturer = Some("softek");
     usb_config.product = Some("pico2joy bring-up");
@@ -281,13 +325,14 @@ async fn main(_spawner: embassy_executor::Spawner) {
             // A host opening the port asserts DTR; greet it and dump the inputs.
             let open = tx.dtr();
 
-            // The 1200-baud touch: open at 1200 then close, the convention every
-            // UF2 board honours for "reboot into the bootloader" (see flash.sh).
-            // The DTR test is what makes it a *touch* - without it, merely opening
-            // the port at 1200 reboots us, and a stale 1200 setting left on a
-            // recycled ttyACM node then bounces the board into the bootloader the
-            // moment anything opens it.
-            if !open && tx.line_coding().data_rate() == 1200 {
+            // The 1200-baud touch: open at 1200, then close. Trigger on DTR
+            // *falling* rather than on "DTR is low", because a host sets the line
+            // coding and raises DTR as two separate requests - a level test catches
+            // the gap between them and reboots the board just for being opened,
+            // which is exactly the trap a stale 1200 on a recycled ttyACM node
+            // sets. Requiring a high-then-low transition means only a real
+            // open-and-close can do it.
+            if was_open && !open && tx.line_coding().data_rate() == 1200 {
                 reboot_to_uf2();
             }
             if open && !was_open {
@@ -522,6 +567,9 @@ async fn main(_spawner: embassy_executor::Spawner) {
     };
 
     // ---- wireless ----
+    // Raw non-connectable advertising, or the connectable trouble-host link:
+    // both want RADIO, so the build picks one.
+    #[cfg(not(feature = "ble"))]
     let wireless = async {
         radio::init();
         let mut adv = radio::Adv::new();
@@ -534,19 +582,57 @@ async fn main(_spawner: embassy_executor::Spawner) {
         let mut ticker = Ticker::every(Duration::from_millis(500));
         loop {
             if RADIO_ON.load(Ordering::Relaxed) {
-                adv.update(&radio::Payload {
-                    buttons: PRESSED.load(Ordering::Relaxed),
-                    detents: DETENTS.load(Ordering::Relaxed) as i16,
-                    uptime_s: Instant::now().as_secs() as u16,
-                    flags: VPP_ON.load(Ordering::Relaxed) as u8,
-                });
+                adv.update(&snapshot());
                 adv.transmit().await;
             }
             ticker.next().await;
         }
     };
 
+    #[cfg(feature = "ble")]
+    let wireless = async {
+        let a = state::device_address();
+        logln!(
+            "ble: \"pico2joy\" connectable as {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}, no pairing",
+            a[5], a[4], a[3], a[2], a[1], a[0]
+        );
+        ble::run(
+            ble::Claimed {
+                rtc0: p.RTC0,
+                timer0: p.TIMER0,
+                temp: p.TEMP,
+                rng: p.RNG,
+                ppi_ch17: p.PPI_CH17,
+                ppi_ch18: p.PPI_CH18,
+                ppi_ch19: p.PPI_CH19,
+                ppi_ch20: p.PPI_CH20,
+                ppi_ch21: p.PPI_CH21,
+                ppi_ch22: p.PPI_CH22,
+                ppi_ch23: p.PPI_CH23,
+                ppi_ch24: p.PPI_CH24,
+                ppi_ch25: p.PPI_CH25,
+                ppi_ch26: p.PPI_CH26,
+                ppi_ch27: p.PPI_CH27,
+                ppi_ch28: p.PPI_CH28,
+                ppi_ch29: p.PPI_CH29,
+                ppi_ch30: p.PPI_CH30,
+                ppi_ch31: p.PPI_CH31,
+            },
+            snapshot,
+        )
+        .await
+    };
+
     join5(usb.run(), writer, inputs, render, join(commands, wireless)).await;
+}
+
+/// A panic leaves the board in the bootloader rather than halted: halting kills
+/// the executor, so USB never comes up and the board looks dead until someone
+/// finds the reset button. This way a bad build is always one copy away from a
+/// good one.
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    reboot_to_uf2()
 }
 
 /// Reset into the bootloader's UF2 mode instead of back into this app.
