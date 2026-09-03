@@ -50,6 +50,7 @@ embassy-time = "0.5.1"
 embassy-usb = "0.6.0"
 embedded-graphics = "0.8.2"
 heapless = "0.9.3"
+libm = "0.2.16"
 nrf-mpsl = { version = "0.4.0", optional = true, default-features = false, features = ["nrf52840"] }
 nrf-sdc = { version = "0.4.0", optional = true, default-features = false, features = ["nrf52840", "peripheral"] }
 panic-halt = "1.0.0"

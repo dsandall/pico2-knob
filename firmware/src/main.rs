@@ -35,6 +35,7 @@
 
 #[cfg(feature = "ble")]
 mod ble;
+mod cube;
 mod display;
 #[cfg(not(feature = "ble"))]
 mod radio;
@@ -99,6 +100,7 @@ const HELP: &str = concat!(
     "\r\ncommands: ? help | p pins | d cycle view (live/pattern/all-on)\r\n",
     "          i re-init display | f flip 180 | +/- contrast | e 12V rail\r\n",
     "          w wireless | m menu (knob moves, knob press acts, BTN3 backs out)\r\n",
+    "          1/2/3 select axis (Z/X/Y, as the buttons do) | , . jog it\r\n",
     "          l led (dark/dim/on) | v verbose | b bootloader\r\n"
 );
 
@@ -123,8 +125,19 @@ static BATT_MV: AtomicU16 = AtomicU16::new(0);
 static LINK_STATE: AtomicU8 = AtomicU8::new(0);
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 static MENU_SEL: AtomicU8 = AtomicU8::new(0);
-/// 0 = live inputs, 1 = orientation pattern, 2 = every pixel on.
+/// 0 = live inputs, 1 = gantry/cube, 2 = orientation pattern, 3 = all pixels on.
 static VIEW: AtomicU8 = AtomicU8::new(0);
+
+/// The device's control model: three jog counters, one selected axis. The knob
+/// drives the selected counter, BTN1/2/3 choose which. Everything on screen is
+/// a view of this.
+static AXIS_COUNTS: [AtomicI32; 3] =
+    [AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0)];
+static AXIS: AtomicU8 = AtomicU8::new(0);
+
+/// Which axis each button selects, in button order. The cube wanted Z, X, Y;
+/// a gantry build that prefers X, Y, Z only has to change this line.
+pub const BUTTON_AXIS: [usize; 3] = [2, 0, 1];
 static REQ_HELP: AtomicBool = AtomicBool::new(false);
 static REQ_PINS: AtomicBool = AtomicBool::new(false);
 static REQ_BOOST: AtomicBool = AtomicBool::new(false);
@@ -153,10 +166,19 @@ fn led_label() -> &'static str {
 
 fn view_label() -> &'static str {
     match VIEW.load(Ordering::Relaxed) {
-        1 => "pattern",
-        2 => "all-on",
+        1 => "gantry",
+        2 => "pattern",
+        3 => "all-on",
         _ => "live",
     }
+}
+
+fn axis_counts() -> [i32; 3] {
+    [
+        AXIS_COUNTS[0].load(Ordering::Relaxed),
+        AXIS_COUNTS[1].load(Ordering::Relaxed),
+        AXIS_COUNTS[2].load(Ordering::Relaxed),
+    ]
 }
 
 /// One state snapshot for whichever radio is built in.
@@ -336,6 +358,21 @@ async fn main(_spawner: embassy_executor::Spawner) {
                             logln!("menu: {}", if open { "open" } else { "closed" });
                         }
                         b'e' => REQ_BOOST.store(true, Ordering::Relaxed),
+                        // Axis select and jog from the console: the same model
+                        // the buttons and knob drive, for testing without hands
+                        // on the puck (and a hook for driving it from a host).
+                        b'1' | b'2' | b'3' => {
+                            let axis = BUTTON_AXIS[(byte - b'1') as usize];
+                            AXIS.store(axis as u8, Ordering::Relaxed);
+                            logln!("axis: {}", ui::AXIS_NAMES[axis]);
+                        }
+                        b',' | b'.' => {
+                            let step = if byte == b'.' { 1 } else { -1 };
+                            let axis = AXIS.load(Ordering::Relaxed) as usize % 3;
+                            let jogged =
+                                AXIS_COUNTS[axis].fetch_add(step, Ordering::Relaxed) + step;
+                            logln!("jog {}={jogged}", ui::AXIS_NAMES[axis]);
+                        }
                         b'd' => REQ_VIEW.store(true, Ordering::Relaxed),
                         b'i' => REQ_REINIT.store(true, Ordering::Relaxed),
                         b'f' => REQ_FLIP.store(true, Ordering::Relaxed),
@@ -452,9 +489,15 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         } else {
                             detents += direction;
                             DETENTS.store(detents, Ordering::Relaxed);
+                            // The knob's real job: jog the selected axis.
+                            let axis = AXIS.load(Ordering::Relaxed) as usize % 3;
+                            let jogged =
+                                AXIS_COUNTS[axis].fetch_add(direction, Ordering::Relaxed)
+                                    + direction;
                             logln!(
-                                "ENC {} detents={detents}",
-                                if direction > 0 { "cw " } else { "ccw" }
+                                "ENC {} {}={jogged} detents={detents}",
+                                if direction > 0 { "cw " } else { "ccw" },
+                                ui::AXIS_NAMES[axis]
                             );
                         }
                     }
@@ -481,6 +524,14 @@ async fn main(_spawner: embassy_executor::Spawner) {
                             SWITCH_NAMES[i],
                             if down { "down" } else { "up" }
                         );
+
+                        // BTN1/2/3 pick the axis the knob jogs, unless the menu
+                        // has the buttons.
+                        if down && i < 3 && !MENU_OPEN.load(Ordering::Relaxed) {
+                            let axis = BUTTON_AXIS[i];
+                            AXIS.store(axis as u8, Ordering::Relaxed);
+                            logln!("axis: {}", ui::AXIS_NAMES[axis]);
+                        }
 
                         // The knob press is the menu key; BTN3 backs out of it.
                         if down {
@@ -526,6 +577,14 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     state::percent_from_mv(millivolts),
                     link_label()
                 );
+                let counts = axis_counts();
+                logln!(
+                    "axis {} | X{:+} Y{:+} Z{:+}",
+                    ui::AXIS_NAMES[AXIS.load(Ordering::Relaxed) as usize % 3],
+                    counts[0],
+                    counts[1],
+                    counts[2]
+                );
             }
 
             // Heartbeat.
@@ -561,7 +620,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
         screen.flush().await;
         Timer::after(SPLASH).await;
 
-        const VIEWS: u8 = 3;
+        const VIEWS: u8 = 4;
         let mut ticker = Ticker::every(Duration::from_millis(40));
         let mut last = None;
         let mut ticks: u32 = 0;
@@ -640,6 +699,8 @@ async fn main(_spawner: embassy_executor::Spawner) {
 
             let menu_open = MENU_OPEN.load(Ordering::Relaxed);
             let view = VIEW.load(Ordering::Relaxed);
+            let counts = axis_counts();
+            let axis = AXIS.load(Ordering::Relaxed) as usize % 3;
             let key = (
                 state.detents,
                 PRESSED.load(Ordering::Relaxed),
@@ -649,6 +710,8 @@ async fn main(_spawner: embassy_executor::Spawner) {
                 menu_open,
                 MENU_SEL.load(Ordering::Relaxed),
                 LINK_STATE.load(Ordering::Relaxed),
+                counts,
+                axis,
             );
             if force || last != Some(key) {
                 last = Some(key);
@@ -664,8 +727,11 @@ async fn main(_spawner: embassy_executor::Spawner) {
                             millivolts: state.millivolts,
                         },
                     ),
-                    (false, 1) => ui::test_pattern(&mut screen),
-                    (false, 2) => ui::all_on(&mut screen),
+                    (false, 1) => {
+                        ui::draw_cube(&mut screen, counts, axis, state.millivolts, state.vpp_on)
+                    }
+                    (false, 2) => ui::test_pattern(&mut screen),
+                    (false, 3) => ui::all_on(&mut screen),
                     (false, _) => ui::draw(&mut screen, &state),
                 }
                 // Nothing to push while the panel has no rail.

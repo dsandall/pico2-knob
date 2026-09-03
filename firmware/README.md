@@ -70,7 +70,7 @@ Single-key commands:
 | `?`   | help                                                                |
 | `p`   | inputs, detents, 12V_EN, battery, link state                        |
 | `m`   | open/close the on-screen menu (handy without hands on the puck)     |
-| `d`   | cycle view: live / orientation pattern / all pixels on              |
+| `d`   | cycle view: live / gantry cube / orientation pattern / all pixels on |
 | `i`   | re-init the display (reset + full init sequence)                    |
 | `f`   | flip the panel 180 degrees (COM/segment remap)                      |
 | `+`/`-` | contrast, in steps of 0x10 from the vendor default 0x4F           |
@@ -79,6 +79,24 @@ Single-key commands:
 | `v`   | verbose: log every encoder quadrature transition, not just detents  |
 | `l`   | LED: dark / dim heartbeat / on                                      |
 | `b`   | reboot into the UF2 bootloader                                      |
+
+## The control model
+
+The device is a 3-axis jog controller, so that is the primitive everything else
+is a view of: three jog counters plus a selected axis (`AXIS_COUNTS`, `AXIS` in
+`main.rs`). **BTN1/2/3 select the axis, the knob jogs the selected one.**
+
+Button-to-axis mapping lives in one line, `BUTTON_AXIS`, currently `Z, X, Y` in
+button order; a build that wants `X, Y, Z` changes only that. The console can
+drive the same model without hands on the puck: `1`/`2`/`3` select, `,`/`.` jog.
+
+The **gantry view** (second in the `d` cycle) renders those counters as a
+rotating wireframe cube, with the three counts along the bottom and the selected
+axis inverted. Hidden-line removal on a convex solid is just backface culling:
+an edge is drawn exactly when at least one of the two faces meeting at it faces
+the camera, so silhouette edges appear once and the three edges meeting at the
+far corner never appear at all. It uses f32 and `libm` rather than fixed point,
+because the Cortex-M4F has a single-precision FPU. 7.5 degrees per detent.
 
 ## On the puck itself
 

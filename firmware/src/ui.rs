@@ -244,6 +244,47 @@ pub fn all_on(d: &mut Display<'_>) {
         .draw(d);
 }
 
+/// Axis names, indexed the way the jog counters are.
+pub const AXIS_NAMES: [&str; 3] = ["X", "Y", "Z"];
+
+/// The gantry screen: a wireframe cube standing in for the machine, and the
+/// three jog counters with the selected axis highlighted. Turn the knob to jog
+/// the selected axis; BTN1/2/3 pick which one.
+pub fn draw_cube(d: &mut Display<'_>, counts: [i32; 3], selected: usize, millivolts: u16, vpp_on: bool) {
+    d.clear();
+    header(d, millivolts, vpp_on);
+
+    crate::cube::Cube::from_counts(counts).wireframe(d);
+
+    let fill = PrimitiveStyle::with_fill(BinaryColor::On);
+    let on = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let small_inv = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    let centred = TextStyleBuilder::new()
+        .baseline(Baseline::Middle)
+        .alignment(Alignment::Center)
+        .build();
+
+    // One box per axis, in button order, showing its jog count.
+    for (slot, &axis) in crate::BUTTON_AXIS.iter().enumerate() {
+        let origin = Point::new(2 + 42 * slot as i32, 106);
+        let rect = Rectangle::new(origin, Size::new(40, 20));
+        let active = axis == selected;
+        let _ = rect.into_styled(if active { fill } else { on }).draw(d);
+        let style = if active { small_inv } else { small };
+
+        let mut label: String<12> = String::new();
+        let _ = write!(label, "{}{:+}", AXIS_NAMES[axis], counts[axis]);
+        let _ = Text::with_text_style(
+            &label,
+            Point::new(origin.x + 20, origin.y + 10),
+            style,
+            centred,
+        )
+        .draw(d);
+    }
+}
+
 /// Unambiguous orientation check: the solid block and "TL" belong in the top-left
 /// corner. Mirrored means segment remap is wrong; rotated means the page/column
 /// mapping is.
