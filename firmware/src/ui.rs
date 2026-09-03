@@ -28,33 +28,165 @@ pub struct State {
     pub detents: i32,
     pub pressed: [bool; 4],
     pub vpp_on: bool,
+    pub millivolts: u16,
+    pub link: &'static str,
+}
+
+/// What the menu offers. The order is the order on screen, and
+/// [`MenuItem::COUNT`] is what the knob wraps around.
+#[derive(Copy, Clone, PartialEq)]
+pub enum MenuItem {
+    Link,
+    Rail,
+    Led,
+    Screen,
+    Battery,
+    Exit,
+}
+
+impl MenuItem {
+    pub const COUNT: u8 = 6;
+
+    pub fn from_index(index: u8) -> Self {
+        match index % Self::COUNT {
+            0 => Self::Link,
+            1 => Self::Rail,
+            2 => Self::Led,
+            3 => Self::Screen,
+            4 => Self::Battery,
+            _ => Self::Exit,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Link => "ble",
+            Self::Rail => "12V rail",
+            Self::Led => "led",
+            Self::Screen => "screen",
+            Self::Battery => "battery",
+            Self::Exit => "exit",
+        }
+    }
+}
+
+pub struct MenuState {
+    pub selected: u8,
+    pub link: &'static str,
+    pub vpp_on: bool,
+    pub led: &'static str,
+    pub view: &'static str,
+    pub millivolts: u16,
+}
+
+/// Title bar: name, the 12 V flag when it's up, and the battery gauge.
+fn header(d: &mut Display<'_>, millivolts: u16, vpp_on: bool) {
+    let on = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let fill = PrimitiveStyle::with_fill(BinaryColor::On);
+    let small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let top_left = TextStyleBuilder::new().baseline(Baseline::Top).build();
+
+    let _ = Text::with_text_style("pico2joy", Point::new(2, 1), small, top_left).draw(d);
+    if vpp_on {
+        let _ = Text::with_text_style("12V", Point::new(54, 1), small, top_left).draw(d);
+    }
+
+    // Battery: an outline with a nub, filled proportionally, percent to its left.
+    let percent = crate::state::percent_from_mv(millivolts);
+    let mut label: String<8> = String::new();
+    let _ = write!(label, "{percent}%");
+    let _ = Text::with_text_style(
+        &label,
+        Point::new(103, 1),
+        small,
+        TextStyleBuilder::new()
+            .baseline(Baseline::Top)
+            .alignment(Alignment::Right)
+            .build(),
+    )
+    .draw(d);
+
+    let body = Rectangle::new(Point::new(106, 1), Size::new(19, 9));
+    let _ = body.into_styled(on).draw(d);
+    let _ = Rectangle::new(Point::new(125, 4), Size::new(2, 3))
+        .into_styled(fill)
+        .draw(d);
+    let bar = (17 * percent as u32 / 100).min(17);
+    if bar > 0 {
+        let _ = Rectangle::new(Point::new(107, 2), Size::new(bar, 7))
+            .into_styled(fill)
+            .draw(d);
+    }
+
+    let _ = Line::new(Point::new(0, 13), Point::new(127, 13))
+        .into_styled(on)
+        .draw(d);
+}
+
+/// The knob-driven menu: turn to move, press the knob to act, BTN3 to leave.
+pub fn draw_menu(d: &mut Display<'_>, menu: &MenuState) {
+    d.clear();
+    header(d, menu.millivolts, menu.vpp_on);
+
+    let fill = PrimitiveStyle::with_fill(BinaryColor::On);
+    let small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let small_inv = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    let top_left = TextStyleBuilder::new().baseline(Baseline::Top).build();
+    let top_right = TextStyleBuilder::new()
+        .baseline(Baseline::Top)
+        .alignment(Alignment::Right)
+        .build();
+
+    for index in 0..MenuItem::COUNT {
+        let item = MenuItem::from_index(index);
+        let y = 18 + 12 * index as i32;
+        let selected = index == menu.selected % MenuItem::COUNT;
+        if selected {
+            let _ = Rectangle::new(Point::new(0, y - 1), Size::new(128, 12))
+                .into_styled(fill)
+                .draw(d);
+        }
+        let style = if selected { small_inv } else { small };
+        let _ = Text::with_text_style(item.label(), Point::new(4, y), style, top_left).draw(d);
+
+        let mut value: String<12> = String::new();
+        match item {
+            MenuItem::Link => {
+                let _ = write!(value, "{}", menu.link);
+            }
+            MenuItem::Rail => {
+                let _ = write!(value, "{}", if menu.vpp_on { "on" } else { "off" });
+            }
+            MenuItem::Led => {
+                let _ = write!(value, "{}", menu.led);
+            }
+            MenuItem::Screen => {
+                let _ = write!(value, "{}", menu.view);
+            }
+            MenuItem::Battery => {
+                let _ = write!(value, "{}.{:02}V", menu.millivolts / 1000, (menu.millivolts % 1000) / 10);
+            }
+            MenuItem::Exit => {}
+        }
+        if !value.is_empty() {
+            let _ = Text::with_text_style(&value, Point::new(124, y), style, top_right).draw(d);
+        }
+    }
 }
 
 pub fn draw(d: &mut Display<'_>, state: &State) {
     d.clear();
+    header(d, state.millivolts, state.vpp_on);
 
     let on = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
     let fill = PrimitiveStyle::with_fill(BinaryColor::On);
     let small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
     let small_inv = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
     let big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
-    let top_left = TextStyleBuilder::new().baseline(Baseline::Top).build();
     let centred = TextStyleBuilder::new()
         .baseline(Baseline::Middle)
         .alignment(Alignment::Center)
         .build();
-
-    let _ = Text::with_text_style("pico2joy", Point::new(2, 1), small, top_left).draw(d);
-    if state.vpp_on {
-        let right = TextStyleBuilder::new()
-            .baseline(Baseline::Top)
-            .alignment(Alignment::Right)
-            .build();
-        let _ = Text::with_text_style("12V", Point::new(126, 1), small, right).draw(d);
-    }
-    let _ = Line::new(Point::new(0, 13), Point::new(127, 13))
-        .into_styled(on)
-        .draw(d);
 
     // Encoder ring: every detent moves the filled dot one position.
     let active = state.detents.rem_euclid(RING.len() as i32) as usize;
@@ -70,6 +202,18 @@ pub fn draw(d: &mut Display<'_>, state: &State) {
     let mut count: String<12> = String::new();
     let _ = write!(count, "{}", state.detents);
     let _ = Text::with_text_style(&count, Point::new(64, 58), big, centred).draw(d);
+
+    // Link state gets the strip between the ring and the pips.
+    let _ = Text::with_text_style(
+        state.link,
+        Point::new(64, 98),
+        small,
+        TextStyleBuilder::new()
+            .baseline(Baseline::Middle)
+            .alignment(Alignment::Center)
+            .build(),
+    )
+    .draw(d);
 
     // Button pips: outlined when up, solid with inverted label when down.
     for (i, label) in LABELS.iter().enumerate() {

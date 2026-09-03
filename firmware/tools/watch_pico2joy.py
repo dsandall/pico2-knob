@@ -33,7 +33,7 @@ ADDR_TYPE_LE = 0x06
 AD_COMPLETE_LOCAL_NAME = 0x09
 AD_MANUFACTURER_DATA = 0xFF
 COMPANY_ID = 0xFFFF  # reserved-for-testing, matching the firmware
-FORMAT = 1  # radio.rs FORMAT
+FORMAT = 2  # state.rs FORMAT
 BUTTONS = ["BTN1", "BTN2", "BTN3", "ENC_SW"]
 
 
@@ -51,9 +51,11 @@ def parse_eir(blob):
 
 def decode_state(fields):
     mfg = fields.get(AD_MANUFACTURER_DATA)
-    if mfg is None or len(mfg) < 10:
+    if mfg is None or len(mfg) < 12:
         return None
-    company, fmt, seq, buttons, detents, uptime, flags = struct.unpack("<HBBBhHB", mfg[:10])
+    company, fmt, seq, buttons, detents, uptime, flags, millivolts = struct.unpack(
+        "<HBBBhHBH", mfg[:12]
+    )
     if company != COMPANY_ID or fmt != FORMAT:
         return None
     return {
@@ -62,6 +64,7 @@ def decode_state(fields):
         "detents": detents,
         "uptime_s": uptime,
         "vpp": bool(flags & 1),
+        "millivolts": millivolts,
     }
 
 
@@ -132,7 +135,8 @@ def main():
             down = ",".join(state["down"]) or "-"
             print(
                 f"{mac}  {rssi:4d} dBm  seq={state['seq']:3d}  detents={state['detents']:+5d}  "
-                f"down={down:<20} up={state['uptime_s']:5d}s  vpp={'on' if state['vpp'] else 'off'}",
+                f"down={down:<20} up={state['uptime_s']:5d}s  "
+                f"vpp={'on' if state['vpp'] else 'off'}  bat={state['millivolts']/1000:.2f}V",
                 flush=True,
             )
     except KeyboardInterrupt:

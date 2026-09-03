@@ -68,15 +68,41 @@ Single-key commands:
 | key   | does                                                                |
 |-------|---------------------------------------------------------------------|
 | `?`   | help                                                                |
-| `p`   | print current levels of every input, plus detents and 12V_EN        |
-| `d`   | toggle the orientation test pattern                                 |
+| `p`   | inputs, detents, 12V_EN, battery, link state                        |
+| `m`   | open/close the on-screen menu (handy without hands on the puck)     |
+| `d`   | cycle view: live / orientation pattern / all pixels on              |
 | `i`   | re-init the display (reset + full init sequence)                    |
 | `f`   | flip the panel 180 degrees (COM/segment remap)                      |
 | `+`/`-` | contrast, in steps of 0x10 from the vendor default 0x4F           |
 | `e`   | toggle the 12 V panel rail — panel off first on the way down        |
+| `w`   | toggle the radio (advertising, or starting the BLE link)            |
 | `v`   | verbose: log every encoder quadrature transition, not just detents  |
-| `l`   | hold the LED on (heartbeat otherwise: 60 ms every second)           |
+| `l`   | LED: dark / dim heartbeat / on                                      |
 | `b`   | reboot into the UF2 bootloader                                      |
+
+## On the puck itself
+
+- **Press the knob** to open the menu, **turn** to move, **press** to act,
+  **BTN3** to back out. Rows: `ble`, `12V rail`, `led`, `screen`, `battery`,
+  `exit` — each showing its current value on the right.
+- The title bar carries a battery gauge and a `12V` flag; the live view shows
+  the encoder ring, the detent count, the link state and a pip per button.
+
+## Battery
+
+The nice!nano v2 senses the cell through **VDDH**, not a divider pin, so this
+samples VDDH/5 on the SAADC against the internal 0.6 V reference at gain 1/6:
+
+    millivolts = raw * 18000 / 4096
+
+Percent comes from a piecewise LiPo curve (`state::percent_from_mv`), because a
+straight voltage-to-percent line is useless on a cell that sits at 3.8 V for
+most of its life.
+
+Two things to expect. On USB with no cell it reads about **4.54 V** — VBUS less
+the input diode drop — and therefore claims 100%. And while charging it reads
+the charger's output rather than the cell, so it will read full before the cell
+is. Neither is worth correcting until a battery is actually on J2.
 
 ## What this actually tests
 

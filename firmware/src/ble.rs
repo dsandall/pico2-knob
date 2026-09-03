@@ -130,6 +130,7 @@ async fn try_run<F: FnMut() -> Payload>(p: Claimed, mut snapshot: F) -> Result<(
         skip_wait_lfclk_started: false,
     };
 
+    crate::LINK_STATE.store(1, core::sync::atomic::Ordering::Relaxed);
     step("mpsl init").await;
     let mpsl_p = MpslPeripherals::new(p.rtc0, p.timer0, p.temp, p.ppi_ch19, p.ppi_ch30, p.ppi_ch31);
     static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
@@ -182,6 +183,7 @@ async fn try_run<F: FnMut() -> Payload>(p: Claimed, mut snapshot: F) -> Result<(
     };
 
     step("advertising, connectable, no pairing").await;
+    crate::LINK_STATE.store(2, core::sync::atomic::Ordering::Relaxed);
     let serve = async {
         loop {
             let acceptor = match peripheral
@@ -203,12 +205,14 @@ async fn try_run<F: FnMut() -> Payload>(p: Claimed, mut snapshot: F) -> Result<(
 
             let Ok(conn) = acceptor.accept().await else { continue };
             let Ok(conn) = conn.with_attribute_server(&server) else { continue };
+            crate::LINK_STATE.store(3, core::sync::atomic::Ordering::Relaxed);
             crate::logln!("ble: connected");
 
             loop {
                 match select(conn.next(), Timer::after(NOTIFY_INTERVAL)).await {
                     Either::First(GattConnectionEvent::Disconnected { reason }) => {
                         crate::logln!("ble: disconnected, reason {:?}", reason);
+                        crate::LINK_STATE.store(2, core::sync::atomic::Ordering::Relaxed);
                         break;
                     }
                     Either::First(GattConnectionEvent::Gatt { event }) => {

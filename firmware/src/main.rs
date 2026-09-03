@@ -42,12 +42,13 @@ mod state;
 mod ui;
 
 use core::fmt::Write as _;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, Ordering};
 
 use embassy_futures::join::{join, join5};
 use embassy_nrf::config::HfclkSource;
 use embassy_nrf::gpio::{Flex, Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::{DutyCycle, SimpleConfig, SimplePwm};
+use embassy_nrf::saadc::{self, ChannelConfig, Saadc, VddhDiv5Input};
 use embassy_nrf::spim::{self, Spim};
 #[cfg(not(feature = "ble"))]
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
@@ -72,6 +73,7 @@ bind_interrupts!(struct Irqs {
     #[cfg(not(feature = "ble"))]
     CLOCK_POWER => usb::vbus_detect::InterruptHandler;
     SPIM3 => spim::InterruptHandler<peripherals::SPI3>;
+    SAADC => saadc::InterruptHandler;
 });
 
 /// Poll interval for switches and the encoder. 1 kHz is far faster than a thumb.
@@ -96,7 +98,8 @@ const SWITCH_NAMES: [&str; 4] = ["BTN1", "BTN2", "BTN3", "ENC_SW"];
 const HELP: &str = concat!(
     "\r\ncommands: ? help | p pins | d cycle view (live/pattern/all-on)\r\n",
     "          i re-init display | f flip 180 | +/- contrast | e 12V rail\r\n",
-    "          w wireless advertising | l led (dark/dim/on) | v verbose | b bootloader\r\n"
+    "          w wireless | m menu (knob moves, knob press acts, BTN3 backs out)\r\n",
+    "          l led (dark/dim/on) | v verbose | b bootloader\r\n"
 );
 
 type Line = String<192>;
@@ -114,6 +117,14 @@ static LED_MODE: AtomicU8 = AtomicU8::new(1);
 /// 'w' - see the note in `ble::run`.
 static RADIO_ON: AtomicBool = AtomicBool::new(!cfg!(feature = "ble"));
 static SEQ: AtomicU8 = AtomicU8::new(0);
+/// BAT+ / VDDH in millivolts, refreshed by the render loop.
+static BATT_MV: AtomicU16 = AtomicU16::new(0);
+/// 0 = off, 1 = starting, 2 = advertising, 3 = connected.
+static LINK_STATE: AtomicU8 = AtomicU8::new(0);
+static MENU_OPEN: AtomicBool = AtomicBool::new(false);
+static MENU_SEL: AtomicU8 = AtomicU8::new(0);
+/// 0 = live inputs, 1 = orientation pattern, 2 = every pixel on.
+static VIEW: AtomicU8 = AtomicU8::new(0);
 static REQ_HELP: AtomicBool = AtomicBool::new(false);
 static REQ_PINS: AtomicBool = AtomicBool::new(false);
 static REQ_BOOST: AtomicBool = AtomicBool::new(false);
@@ -123,6 +134,31 @@ static REQ_FLIP: AtomicBool = AtomicBool::new(false);
 static REQ_BRIGHTER: AtomicBool = AtomicBool::new(false);
 static REQ_DIMMER: AtomicBool = AtomicBool::new(false);
 
+fn link_label() -> &'static str {
+    match LINK_STATE.load(Ordering::Relaxed) {
+        1 => "starting",
+        2 => "adv",
+        3 => "connected",
+        _ => "off",
+    }
+}
+
+fn led_label() -> &'static str {
+    match LED_MODE.load(Ordering::Relaxed) {
+        0 => "dark",
+        2 => "on",
+        _ => "dim",
+    }
+}
+
+fn view_label() -> &'static str {
+    match VIEW.load(Ordering::Relaxed) {
+        1 => "pattern",
+        2 => "all-on",
+        _ => "live",
+    }
+}
+
 /// One state snapshot for whichever radio is built in.
 fn snapshot() -> state::Payload {
     state::Payload {
@@ -131,6 +167,7 @@ fn snapshot() -> state::Payload {
         detents: DETENTS.load(Ordering::Relaxed) as i16,
         uptime_s: Instant::now().as_secs() as u16,
         flags: VPP_ON.load(Ordering::Relaxed) as u8,
+        millivolts: BATT_MV.load(Ordering::Relaxed),
     }
 }
 
@@ -210,6 +247,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
         interrupt::USBD.set_priority(interrupt::Priority::P2);
         interrupt::SPIM3.set_priority(interrupt::Priority::P2);
         interrupt::RNG.set_priority(interrupt::Priority::P2);
+        interrupt::SAADC.set_priority(interrupt::Priority::P2);
     }
 
     // The 3V3 pad (OLED VDD, and the R2/R6 pull-ups) sits behind a load switch on
@@ -228,6 +266,15 @@ async fn main(_spawner: embassy_executor::Spawner) {
         Output::new(p.P0_24, Level::High, OutputDrive::Standard), // CS, idle high
         Output::new(p.P0_06, Level::Low, OutputDrive::Standard),  // DC
         Output::new(p.P0_22, Level::High, OutputDrive::Standard), // RES, out of reset
+    );
+
+    // The nice!nano v2 senses the cell through VDDH rather than a divider pin,
+    // so this reads VDDH/5 against the internal 0.6 V reference at gain 1/6.
+    let mut battery = Saadc::new(
+        p.SAADC,
+        Irqs,
+        saadc::Config::default(),
+        [ChannelConfig::single_ended(VddhDiv5Input)],
     );
 
     let enc_a = Input::new(p.P0_09, Pull::Up);
@@ -283,6 +330,11 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     match byte {
                         b'?' | b'h' => REQ_HELP.store(true, Ordering::Relaxed),
                         b'p' => REQ_PINS.store(true, Ordering::Relaxed),
+                        // Handy without hands on the puck.
+                        b'm' => {
+                            let open = !MENU_OPEN.fetch_xor(true, Ordering::Relaxed);
+                            logln!("menu: {}", if open { "open" } else { "closed" });
+                        }
                         b'e' => REQ_BOOST.store(true, Ordering::Relaxed),
                         b'd' => REQ_VIEW.store(true, Ordering::Relaxed),
                         b'i' => REQ_REINIT.store(true, Ordering::Relaxed),
@@ -388,13 +440,23 @@ async fn main(_spawner: embassy_executor::Spawner) {
                 } else {
                     quarters += step;
                     if quarters.abs() >= 4 {
-                        detents += quarters.signum() as i32;
+                        let direction = quarters.signum() as i32;
                         quarters = 0;
-                        DETENTS.store(detents, Ordering::Relaxed);
-                        logln!(
-                            "ENC {} detents={detents}",
-                            if step > 0 { "cw " } else { "ccw" }
-                        );
+                        if MENU_OPEN.load(Ordering::Relaxed) {
+                            // In the menu the knob moves the selection instead of
+                            // spinning the counter.
+                            let count = ui::MenuItem::COUNT as i32;
+                            let selected = MENU_SEL.load(Ordering::Relaxed) as i32;
+                            let next = (selected + direction).rem_euclid(count);
+                            MENU_SEL.store(next as u8, Ordering::Relaxed);
+                        } else {
+                            detents += direction;
+                            DETENTS.store(detents, Ordering::Relaxed);
+                            logln!(
+                                "ENC {} detents={detents}",
+                                if direction > 0 { "cw " } else { "ccw" }
+                            );
+                        }
                     }
                 }
             }
@@ -419,6 +481,23 @@ async fn main(_spawner: embassy_executor::Spawner) {
                             SWITCH_NAMES[i],
                             if down { "down" } else { "up" }
                         );
+
+                        // The knob press is the menu key; BTN3 backs out of it.
+                        if down {
+                            let open = MENU_OPEN.load(Ordering::Relaxed);
+                            match (i, open) {
+                                (3, false) => {
+                                    MENU_OPEN.store(true, Ordering::Relaxed);
+                                    logln!("menu: open");
+                                }
+                                (3, true) => activate_menu_item(),
+                                (2, true) => {
+                                    MENU_OPEN.store(false, Ordering::Relaxed);
+                                    logln!("menu: closed");
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
             }
@@ -437,10 +516,15 @@ async fn main(_spawner: embassy_executor::Spawner) {
                 for (name, pin) in SWITCH_NAMES.iter().zip(switches.iter()) {
                     let _ = write!(line, " {name}={}", pin.is_high() as u8);
                 }
+                let millivolts = BATT_MV.load(Ordering::Relaxed);
                 logln!(
-                    "{line} | detents={} | 12V_EN {}",
+                    "{line} | detents={} | 12V_EN {} | bat {}.{:02}V {}% | link {}",
                     DETENTS.load(Ordering::Relaxed),
-                    if VPP_ON.load(Ordering::Relaxed) { "low" } else { "hi-Z" }
+                    if VPP_ON.load(Ordering::Relaxed) { "low" } else { "hi-Z" },
+                    millivolts / 1000,
+                    (millivolts % 1000) / 10,
+                    state::percent_from_mv(millivolts),
+                    link_label()
                 );
             }
 
@@ -477,11 +561,10 @@ async fn main(_spawner: embassy_executor::Spawner) {
         screen.flush().await;
         Timer::after(SPLASH).await;
 
-        // 0 = live inputs, 1 = orientation pattern, 2 = every pixel on.
         const VIEWS: u8 = 3;
         let mut ticker = Ticker::every(Duration::from_millis(40));
-        let mut view: u8 = 0;
         let mut last = None;
+        let mut ticks: u32 = 0;
 
         loop {
             let mut force = false;
@@ -509,17 +592,22 @@ async fn main(_spawner: embassy_executor::Spawner) {
                 logln!("contrast 0x{c:02x}");
             }
             if REQ_VIEW.swap(false, Ordering::Relaxed) {
-                view = (view + 1) % VIEWS;
-                logln!(
-                    "view: {}",
-                    match view {
-                        1 => "orientation pattern",
-                        2 => "all pixels on",
-                        _ => "live inputs",
-                    }
-                );
+                let view = (VIEW.load(Ordering::Relaxed) + 1) % VIEWS;
+                VIEW.store(view, Ordering::Relaxed);
+                logln!("view: {}", view_label());
                 force = true;
             }
+
+            // The cell, every couple of seconds. Cheap, and it barely moves.
+            if ticks % 50 == 0 {
+                let mut sample = [0i16; 1];
+                battery.sample(&mut sample).await;
+                // VDDH/5 at gain 1/6 against the 0.6 V reference, 12-bit:
+                // mV = raw * 0.6 * 6 * 5 * 1000 / 4096.
+                let millivolts = (sample[0].max(0) as u32 * 18_000 / 4096) as u16;
+                BATT_MV.store(millivolts, Ordering::Relaxed);
+            }
+            ticks = ticks.wrapping_add(1);
             if REQ_BOOST.swap(false, Ordering::Relaxed) {
                 if boost.on {
                     // Panel off before its rail, per the usual OLED ordering.
@@ -546,15 +634,39 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     ]
                 },
                 vpp_on: boost.on,
+                millivolts: BATT_MV.load(Ordering::Relaxed),
+                link: link_label(),
             };
 
-            let key = (state.detents, PRESSED.load(Ordering::Relaxed), state.vpp_on, view);
+            let menu_open = MENU_OPEN.load(Ordering::Relaxed);
+            let view = VIEW.load(Ordering::Relaxed);
+            let key = (
+                state.detents,
+                PRESSED.load(Ordering::Relaxed),
+                state.vpp_on,
+                view,
+                state.millivolts,
+                menu_open,
+                MENU_SEL.load(Ordering::Relaxed),
+                LINK_STATE.load(Ordering::Relaxed),
+            );
             if force || last != Some(key) {
                 last = Some(key);
-                match view {
-                    1 => ui::test_pattern(&mut screen),
-                    2 => ui::all_on(&mut screen),
-                    _ => ui::draw(&mut screen, &state),
+                match (menu_open, view) {
+                    (true, _) => ui::draw_menu(
+                        &mut screen,
+                        &ui::MenuState {
+                            selected: MENU_SEL.load(Ordering::Relaxed),
+                            link: link_label(),
+                            vpp_on: state.vpp_on,
+                            led: led_label(),
+                            view: view_label(),
+                            millivolts: state.millivolts,
+                        },
+                    ),
+                    (false, 1) => ui::test_pattern(&mut screen),
+                    (false, 2) => ui::all_on(&mut screen),
+                    (false, _) => ui::draw(&mut screen, &state),
                 }
                 // Nothing to push while the panel has no rail.
                 if boost.on {
@@ -581,7 +693,9 @@ async fn main(_spawner: embassy_executor::Spawner) {
 
         let mut ticker = Ticker::every(Duration::from_millis(500));
         loop {
-            if RADIO_ON.load(Ordering::Relaxed) {
+            let on = RADIO_ON.load(Ordering::Relaxed);
+            LINK_STATE.store(if on { 2 } else { 0 }, Ordering::Relaxed);
+            if on {
                 adv.update(&snapshot());
                 adv.transmit().await;
             }
@@ -624,6 +738,29 @@ async fn main(_spawner: embassy_executor::Spawner) {
     };
 
     join5(usb.run(), writer, inputs, render, join(commands, wireless)).await;
+}
+
+/// Act on the highlighted menu row. Everything routes through the same request
+/// flags the console commands use, so there is one implementation of each action.
+fn activate_menu_item() {
+    match ui::MenuItem::from_index(MENU_SEL.load(Ordering::Relaxed)) {
+        ui::MenuItem::Link => {
+            let on = !RADIO_ON.fetch_xor(true, Ordering::Relaxed);
+            logln!("menu: link {}", if on { "on" } else { "off" });
+        }
+        ui::MenuItem::Rail => REQ_BOOST.store(true, Ordering::Relaxed),
+        ui::MenuItem::Led => {
+            let mode = (LED_MODE.load(Ordering::Relaxed) + 1) % 3;
+            LED_MODE.store(mode, Ordering::Relaxed);
+        }
+        ui::MenuItem::Screen => REQ_VIEW.store(true, Ordering::Relaxed),
+        // Nothing to activate: the row is the reading.
+        ui::MenuItem::Battery => {}
+        ui::MenuItem::Exit => {
+            MENU_OPEN.store(false, Ordering::Relaxed);
+            logln!("menu: closed");
+        }
+    }
 }
 
 /// A panic leaves the board in the bootloader rather than halted: halting kills
