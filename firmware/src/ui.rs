@@ -40,12 +40,14 @@ pub enum MenuItem {
     Rail,
     Led,
     Screen,
+    Step,
+    Home,
     Battery,
     Exit,
 }
 
 impl MenuItem {
-    pub const COUNT: u8 = 6;
+    pub const COUNT: u8 = 8;
 
     pub fn from_index(index: u8) -> Self {
         match index % Self::COUNT {
@@ -53,7 +55,9 @@ impl MenuItem {
             1 => Self::Rail,
             2 => Self::Led,
             3 => Self::Screen,
-            4 => Self::Battery,
+            4 => Self::Step,
+            5 => Self::Home,
+            6 => Self::Battery,
             _ => Self::Exit,
         }
     }
@@ -64,6 +68,8 @@ impl MenuItem {
             Self::Rail => "12V rail",
             Self::Led => "led",
             Self::Screen => "screen",
+            Self::Step => "jog step",
+            Self::Home => "home all",
             Self::Battery => "battery",
             Self::Exit => "exit",
         }
@@ -76,6 +82,7 @@ pub struct MenuState {
     pub vpp_on: bool,
     pub led: &'static str,
     pub view: &'static str,
+    pub step_um: i32,
     pub millivolts: u16,
 }
 
@@ -123,7 +130,7 @@ fn header(d: &mut Display<'_>, millivolts: u16, vpp_on: bool) {
         .draw(d);
 }
 
-/// The knob-driven menu: turn to move, press the knob to act, BTN3 to leave.
+/// The knob-driven menu: turn to move, any of BTN1/2/3 to select, knob to leave.
 pub fn draw_menu(d: &mut Display<'_>, menu: &MenuState) {
     d.clear();
     header(d, menu.millivolts, menu.vpp_on);
@@ -163,6 +170,11 @@ pub fn draw_menu(d: &mut Display<'_>, menu: &MenuState) {
             MenuItem::Screen => {
                 let _ = write!(value, "{}", menu.view);
             }
+            MenuItem::Step => {
+                let _ = write!(value, "{}", Millimetres(menu.step_um));
+            }
+            // Both are actions, not readings: the row is the whole story.
+            MenuItem::Home => {}
             MenuItem::Battery => {
                 let _ = write!(value, "{}.{:02}V", menu.millivolts / 1000, (menu.millivolts % 1000) / 10);
             }
@@ -235,6 +247,29 @@ pub fn draw(d: &mut Display<'_>, state: &State) {
     }
 }
 
+/// What the puck shows while it hands itself to the bootloader. A flash takes a
+/// few seconds and the screen would otherwise just go dark, which looks exactly
+/// like a board that died - so say what is happening, and say not to unplug.
+pub fn draw_flashing(d: &mut Display<'_>, mode: &str) {
+    d.clear();
+
+    let on = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+    let small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let centred = TextStyleBuilder::new()
+        .baseline(Baseline::Middle)
+        .alignment(Alignment::Center)
+        .build();
+
+    let _ = Rectangle::new(Point::new(6, 34), Size::new(116, 60))
+        .into_styled(on)
+        .draw(d);
+    let _ = Text::with_text_style("FLASHING", Point::new(64, 54), big, centred).draw(d);
+    let _ = Text::with_text_style(mode, Point::new(64, 72), small, centred).draw(d);
+    let _ = Text::with_text_style("keep it plugged in", Point::new(64, 84), small, centred)
+        .draw(d);
+}
+
 /// Every pixel lit: maximum draw on VPP and the least ambiguous "is this panel
 /// alive at all" test there is. 100% display area is still only ~25 uA of IPP.
 pub fn all_on(d: &mut Display<'_>) {
@@ -246,6 +281,105 @@ pub fn all_on(d: &mut Display<'_>) {
 
 /// Axis names, indexed the way the jog counters are.
 pub const AXIS_NAMES: [&str; 3] = ["X", "Y", "Z"];
+
+/// Micrometres as millimetres with two decimals - as fine as a jog step goes,
+/// and as much as a 128 px row has room for.
+pub struct Millimetres(pub i32);
+
+impl core::fmt::Display for Millimetres {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let um = self.0;
+        let sign = if um < 0 { "-" } else { "" };
+        let abs = um.unsigned_abs();
+        write!(f, "{sign}{}.{:02}", abs / 1000, (abs % 1000) / 10)
+    }
+}
+
+/// The gantry screen: where the printer says its toolhead is, inside the travel
+/// it has, and which axis the knob will jog. Everything here is the host's
+/// truth - see [`crate::gantry`] - so an unhomed axis shows dashes rather than a
+/// number, and a bridge that stops talking says "offline" instead of freezing a
+/// stale pose on screen.
+pub fn draw_gantry(d: &mut Display<'_>, selected: usize, millivolts: u16, vpp_on: bool) {
+    d.clear();
+    header(d, millivolts, vpp_on);
+
+    let on = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let fill = PrimitiveStyle::with_fill(BinaryColor::On);
+    let small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let small_inv = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    let top_left = TextStyleBuilder::new().baseline(Baseline::Top).build();
+    let top_right = TextStyleBuilder::new()
+        .baseline(Baseline::Top)
+        .alignment(Alignment::Right)
+        .build();
+
+    // Status row: what the printer is doing, and which axes know where they are.
+    let _ = Text::with_text_style(
+        crate::gantry::state_label(),
+        Point::new(2, 15),
+        small,
+        top_left,
+    )
+    .draw(d);
+    for axis in 0..crate::gantry::AXES {
+        let origin = Point::new(98 + 10 * axis as i32, 14);
+        let rect = Rectangle::new(origin, Size::new(9, 11));
+        let homed = crate::gantry::homed(axis);
+        let _ = rect.into_styled(if homed { fill } else { on }).draw(d);
+        let _ = Text::with_text_style(
+            AXIS_NAMES[axis],
+            Point::new(origin.x + 2, origin.y + 1),
+            if homed { small_inv } else { small },
+            top_left,
+        )
+        .draw(d);
+    }
+
+    // One block per axis: name, position, and where that sits in its travel.
+    for axis in 0..crate::gantry::AXES {
+        let top = 30 + 26 * axis as i32;
+        let active = axis == selected;
+
+        let name = Rectangle::new(Point::new(2, top), Size::new(11, 11));
+        let _ = name.into_styled(if active { fill } else { on }).draw(d);
+        let _ = Text::with_text_style(
+            AXIS_NAMES[axis],
+            Point::new(5, top + 1),
+            if active { small_inv } else { small },
+            top_left,
+        )
+        .draw(d);
+
+        let (min, max) = crate::gantry::limits(axis);
+        let position = crate::gantry::position(axis);
+        let mut value: String<16> = String::new();
+        if crate::gantry::homed(axis) {
+            let _ = write!(value, "{} mm", Millimetres(position));
+        } else {
+            let _ = write!(value, "--.-- mm");
+        }
+        let _ = Text::with_text_style(&value, Point::new(126, top + 1), small, top_right).draw(d);
+
+        // Travel bar. The outline is the axis's whole range; the block is where
+        // the head is in it.
+        let track = Rectangle::new(Point::new(2, top + 14), Size::new(124, 7));
+        let _ = track.into_styled(on).draw(d);
+        if crate::gantry::homed(axis) && max > min {
+            let span = (max - min) as i64;
+            let along = ((position.clamp(min, max) - min) as i64 * 120) / span;
+            let _ = Rectangle::new(Point::new(4 + along as i32 - 1, top + 16), Size::new(3, 3))
+                .into_styled(fill)
+                .draw(d);
+        }
+    }
+
+    // What one detent is worth, and the reminder of which button picks what.
+    let mut step: String<20> = String::new();
+    let _ = write!(step, "step {} mm", Millimetres(crate::gantry::step_um()));
+    let _ = Text::with_text_style(&step, Point::new(2, 114), small, top_left).draw(d);
+    let _ = Text::with_text_style("1/2/3 axis", Point::new(126, 114), small, top_right).draw(d);
+}
 
 /// The gantry screen: a wireframe cube standing in for the machine, and the
 /// three jog counters with the held axis highlighted. Here the buttons are

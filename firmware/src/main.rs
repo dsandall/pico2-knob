@@ -37,15 +37,17 @@
 mod ble;
 mod cube;
 mod display;
+mod gantry;
 #[cfg(not(feature = "ble"))]
 mod radio;
 mod state;
 mod ui;
 
+use core::cell::RefCell;
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, Ordering};
 
-use embassy_futures::join::{join, join5};
+use embassy_futures::join::{join3, join5};
 use embassy_nrf::config::HfclkSource;
 use embassy_nrf::gpio::{Flex, Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::{DutyCycle, SimpleConfig, SimplePwm};
@@ -57,6 +59,7 @@ use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{bind_interrupts, peripherals};
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
@@ -89,8 +92,15 @@ const HEARTBEAT_ON_TICKS: u32 = 120;
 /// Out of `SimpleConfig::default()`'s max_duty of 1000, at 1 kHz.
 const HEARTBEAT_DUTY: u16 = 30;
 const LED_FULL_DUTY: u16 = 1000;
-/// Magic the Adafruit UF2 bootloader looks for in GPREGRET to stay in UF2 mode.
+/// Magic the Adafruit UF2 bootloader looks for in GPREGRET, from its `src/main.c`.
+/// UF2 gives the mass-storage drive, serial gives CDC-only (what
+/// `adafruit-nrfutil dfu serial` wants), and OTA gives BLE DFU - the one that
+/// makes a wireless update possible at all. OTA is the "SoftDevice not yet
+/// inited" variant, which is us: the SDC is a linked library, not the S140
+/// binary in flash.
 const DFU_MAGIC_UF2_RESET: u8 = 0x57;
+const DFU_MAGIC_SERIAL_ONLY_RESET: u8 = 0x4e;
+const DFU_MAGIC_OTA_RESET: u8 = 0xA8;
 /// How long the orientation test pattern stays up at boot.
 const SPLASH: Duration = Duration::from_millis(1500);
 
@@ -99,16 +109,24 @@ const SWITCH_NAMES: [&str; 4] = ["BTN1", "BTN2", "BTN3", "ENC_SW"];
 const HELP: &str = concat!(
     "\r\ncommands: ? help | p pins | d cycle view (live/gantry/pattern/all-on)\r\n",
     "          i re-init display | f flip 180 | +/- contrast | e 12V rail\r\n",
-    "          w wireless | m menu (knob moves, knob press acts, BTN3 backs out)\r\n",
+    "          w wireless | m menu (knob moves, 1/2/3 select, knob press exits)\r\n",
     "          1/2/3 select axis (Z/X/Y, as the buttons do) | , . jog it\r\n",
-    "          gantry: hold 1/2/3 to jog+spin that axis, knob alone zooms\r\n",
-    "          l led (dark/dim/on) | v verbose | b bootloader\r\n"
+    "          cube: hold 1/2/3 to spin that axis, knob alone zooms\r\n",
+    "          gantry: 1/2/3 pick the axis, knob jogs it (needs the bridge)\r\n",
+    "          l led (dark/dim/on) | v verbose | b bootloader (UF2)\r\n",
+    "          #r uf2|serial|ota  reboot into a bootloader mode\r\n"
 );
 
 type Line = String<192>;
 
 /// Log lines waiting for the USB writer. Bounded and lossy on purpose.
 static LOG: Channel<CriticalSectionRawMutex, Line, 8> = Channel::new();
+
+/// Machine-channel lines waiting for the radio. Separate from [`LOG`] because
+/// the two transports drain at their own pace and a host on one shouldn't stall
+/// the other - and because only protocol lines are worth a notification.
+#[cfg(feature = "ble")]
+static WIRE: Channel<CriticalSectionRawMutex, Line, 8> = Channel::new();
 
 static DETENTS: AtomicI32 = AtomicI32::new(0);
 static PRESSED: AtomicU8 = AtomicU8::new(0);
@@ -126,9 +144,11 @@ static BATT_MV: AtomicU16 = AtomicU16::new(0);
 static LINK_STATE: AtomicU8 = AtomicU8::new(0);
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 static MENU_SEL: AtomicU8 = AtomicU8::new(0);
-/// 0 = live inputs, 1 = gantry/cube, 2 = orientation pattern, 3 = all pixels on.
+/// 0 = live inputs, 1 = the cube, 2 = the real gantry, 3 = orientation pattern,
+/// 4 = all pixels on.
 static VIEW: AtomicU8 = AtomicU8::new(0);
-const VIEW_GANTRY: u8 = 1;
+const VIEW_CUBE: u8 = 1;
+const VIEW_GANTRY: u8 = 2;
 /// Gantry zoom, in detents off the resting size - see [`cube::zoom_scale`].
 static ZOOM: AtomicI32 = AtomicI32::new(0);
 
@@ -142,6 +162,22 @@ static AXIS: AtomicU8 = AtomicU8::new(0);
 /// Which axis each button selects, in button order. The cube wanted Z, X, Y;
 /// a gantry build that prefers X, Y, Z only has to change this line.
 pub const BUTTON_AXIS: [usize; 3] = [2, 0, 1];
+/// Why this boot happened, captured once and kept for the banner. The log
+/// channel is lossy and boot is exactly when it overflows, so the one line that
+/// explains a reboot loop is the one line that must not go through it.
+static RESET_REASON: Mutex<CriticalSectionRawMutex, RefCell<&'static str>> =
+    Mutex::new(RefCell::new("unknown"));
+
+/// What the previous boot panicked with, waiting for someone to connect and
+/// read it. Like [`RESET_REASON`], it stays out of the lossy log channel.
+static PANIC_MESSAGE: Mutex<CriticalSectionRawMutex, RefCell<Option<Line>>> =
+    Mutex::new(RefCell::new(None));
+
+/// A bootloader mode the render loop should announce before we jump to it, or
+/// 0 for "nothing pending". Going through the render loop is what buys the
+/// screen a chance to say so - the reset itself is instant.
+static REQ_REBOOT: AtomicU8 = AtomicU8::new(0);
+
 static REQ_HELP: AtomicBool = AtomicBool::new(false);
 static REQ_PINS: AtomicBool = AtomicBool::new(false);
 static REQ_BOOST: AtomicBool = AtomicBool::new(false);
@@ -170,9 +206,10 @@ fn led_label() -> &'static str {
 
 fn view_label() -> &'static str {
     match VIEW.load(Ordering::Relaxed) {
-        1 => "gantry",
-        2 => "pattern",
-        3 => "all-on",
+        VIEW_CUBE => "cube",
+        VIEW_GANTRY => "gantry",
+        3 => "pattern",
+        4 => "all-on",
         _ => "live",
     }
 }
@@ -216,6 +253,22 @@ fn log_fmt(args: core::fmt::Arguments) {
 #[macro_export]
 macro_rules! logln {
     ($($arg:tt)*) => { crate::log_fmt(format_args!($($arg)*)) };
+}
+
+/// A line on the machine channel: no timestamp, because the far end is a parser
+/// rather than a person. See [`gantry`] for the wire format.
+fn proto_fmt(args: core::fmt::Arguments) {
+    let mut line: Line = String::new();
+    let _ = line.write_fmt(args);
+    let _ = line.push_str("\r\n");
+    #[cfg(feature = "ble")]
+    let _ = WIRE.try_send(line.clone());
+    let _ = LOG.try_send(line);
+}
+
+#[macro_export]
+macro_rules! proto {
+    ($($arg:tt)*) => { crate::proto_fmt(format_args!($($arg)*)) };
 }
 
 /// The 12 V panel rail (U2, MC34063) hangs off +BATT behind Q1, a P-channel FET
@@ -265,6 +318,12 @@ async fn main(_spawner: embassy_executor::Spawner) {
     // USBD needs the 64 MHz clock derived from HFXO; the nice!nano's MDBT50Q module
     // has the 32 MHz crystal. (Enabling `nfc-pins-as-gpio` also makes the first boot
     // after flashing write UICR and reset once - that is expected.)
+    //
+    // MPSL wants to own the CLOCK peripheral and hand the HF clock out through
+    // `request_hfclk()`, so this is a conflict waiting to be resolved in the
+    // radio build - but leaving it out did not fix MPSL's init hang and does
+    // cost USB the crystal it wants, so the crystal stays until the radio
+    // actually comes up.
     config.hfclk_source = HfclkSource::ExternalXtal;
     // MPSL puts RADIO/RTC0/TIMER0 at P0 and expects nothing else to compete;
     // the app's own interrupts sit below it in the ble build.
@@ -353,13 +412,53 @@ async fn main(_spawner: embassy_executor::Spawner) {
     let (mut tx, mut rx) = class.split();
 
     // ---- host commands ----
+    let reason = reset_reason();
+    RESET_REASON.lock(|cell| *cell.borrow_mut() = reason);
+    logln!("boot: reset reason {reason}");
+    if let Some((count, message)) = take_panic_message() {
+        logln!("boot: last boot panicked ({count} in a row): {message}");
+        PANIC_MESSAGE.lock(|cell| *cell.borrow_mut() = Some(message));
+    }
+
     let commands = async {
         let mut buf = [0u8; 64];
+        // The machine channel shares the port with the console: '#' opens a line
+        // for [`gantry`] to parse, everything else stays a single keystroke.
+        let mut proto: String<96> = String::new();
+        let mut in_proto = false;
         loop {
             rx.wait_connection().await;
             while let Ok(n) = rx.read_packet(&mut buf).await {
                 for &byte in &buf[..n] {
+                    if in_proto {
+                        // '#' never appears inside a line, so seeing one means
+                        // the last line was cut short: start the new one.
+                        if byte == b'#' {
+                            proto.clear();
+                            continue;
+                        }
+                        if byte == b'\n' || byte == b'\r' {
+                            in_proto = false;
+                            machine_line(&proto);
+                            proto.clear();
+                        } else if proto.push(byte as char).is_err() {
+                            // Longer than any line we define: drop it rather
+                            // than parse half of one.
+                            in_proto = false;
+                            proto.clear();
+                        }
+                        continue;
+                    }
                     match byte {
+                        // Opens the machine channel. Deliberately the *only*
+                        // way to reach anything destructive: a single key that
+                        // rebooted the puck would also fire on the tail of a
+                        // protocol line whose '#' went missing, and "#s ..."
+                        // ends up spelling console commands.
+                        b'#' => {
+                            in_proto = true;
+                            proto.clear();
+                        }
                         b'?' | b'h' => REQ_HELP.store(true, Ordering::Relaxed),
                         b'p' => REQ_PINS.store(true, Ordering::Relaxed),
                         // Handy without hands on the puck.
@@ -409,7 +508,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         }
                         // Reboot into UF2 mode, so reflashing doesn't need the
                         // reset button under the puck.
-                        b'b' => reboot_to_uf2(),
+                        b'b' => request_reboot(DFU_MAGIC_UF2_RESET),
                         _ => {}
                     }
                 }
@@ -432,10 +531,22 @@ async fn main(_spawner: embassy_executor::Spawner) {
             // sets. Requiring a high-then-low transition means only a real
             // open-and-close can do it.
             if was_open && !open && tx.line_coding().data_rate() == 1200 {
-                reboot_to_uf2();
+                request_reboot(DFU_MAGIC_UF2_RESET);
             }
             if open && !was_open {
                 emit(&mut tx, "\r\npico2joy bring-up (nice!nano v2, embassy)\r\n").await;
+                let mut line: Line = String::new();
+                let reason = RESET_REASON.lock(|cell| *cell.borrow());
+                let ms = Instant::now().as_millis();
+                let _ = write!(line, "booted {}.{:03}s ago, reset reason: {reason}\r\n",
+                               ms / 1000, ms % 1000);
+                emit(&mut tx, &line).await;
+                let panicked = PANIC_MESSAGE.lock(|cell| cell.borrow().clone());
+                if let Some(message) = panicked {
+                    emit(&mut tx, "LAST BOOT PANICKED: ").await;
+                    emit(&mut tx, &message).await;
+                    emit(&mut tx, "\r\n").await;
+                }
                 emit(&mut tx, HELP).await;
                 REQ_PINS.store(true, Ordering::Relaxed);
             }
@@ -499,20 +610,43 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         } else {
                             detents += direction;
                             DETENTS.store(detents, Ordering::Relaxed);
-                            // On the gantry screen the buttons are momentary:
-                            // the knob only jogs while an axis is held down, and
-                            // with nothing held it zooms the view instead.
-                            // Everywhere else BTN1/2/3 stay a latched select.
-                            let gantry = VIEW.load(Ordering::Relaxed) == VIEW_GANTRY;
+                            let view = VIEW.load(Ordering::Relaxed);
+                            // On the cube screen the buttons are momentary: the
+                            // knob only spins an axis while it is held down, and
+                            // with nothing held it zooms. Everywhere else
+                            // BTN1/2/3 stay a latched select.
                             let held = held_axis(&pressed);
-                            let axis = match (gantry, held) {
-                                (true, None) => None,
-                                (true, some) => some,
-                                (false, _) => {
-                                    Some(AXIS.load(Ordering::Relaxed) as usize % 3)
-                                }
+                            let axis = match (view, held) {
+                                (VIEW_CUBE, None) => None,
+                                (VIEW_CUBE, some) => some,
+                                _ => Some(AXIS.load(Ordering::Relaxed) as usize % 3),
                             };
                             match axis {
+                                // The real machine: the knob asks the printer to
+                                // move, and the screen only changes once it says
+                                // it did.
+                                Some(axis) if view == VIEW_GANTRY => {
+                                    if gantry::can_jog(axis) {
+                                        let delta = gantry::jog(axis, direction);
+                                        logln!(
+                                            "jog {} {} mm",
+                                            ui::AXIS_NAMES[axis],
+                                            ui::Millimetres(delta)
+                                        );
+                                    } else {
+                                        logln!(
+                                            "jog {} refused: {}",
+                                            ui::AXIS_NAMES[axis],
+                                            if !gantry::online() {
+                                                "no bridge"
+                                            } else if !gantry::homed(axis) {
+                                                "not homed"
+                                            } else {
+                                                "printing"
+                                            }
+                                        );
+                                    }
+                                }
                                 Some(axis) => {
                                     // The knob's real job: jog the chosen axis.
                                     let jogged = AXIS_COUNTS[axis]
@@ -563,12 +697,22 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         // BTN1/2/3 pick the axis the knob jogs, unless the menu
                         // has the buttons.
                         if down && i < 3 && !MENU_OPEN.load(Ordering::Relaxed) {
-                            let axis = BUTTON_AXIS[i];
+                            // On the gantry screen the buttons are the axes they
+                            // are labelled with; elsewhere they follow the cube's
+                            // preferred order.
+                            let axis = if VIEW.load(Ordering::Relaxed) == VIEW_GANTRY {
+                                i
+                            } else {
+                                BUTTON_AXIS[i]
+                            };
                             AXIS.store(axis as u8, Ordering::Relaxed);
                             logln!("axis: {}", ui::AXIS_NAMES[axis]);
                         }
 
-                        // The knob press is the menu key; BTN3 backs out of it.
+                        // The knob press is the menu key, and it means the
+                        // same thing both ways round: in opens it, in again
+                        // leaves. Inside, the three buttons are the select -
+                        // whichever one falls under your thumb.
                         if down {
                             let open = MENU_OPEN.load(Ordering::Relaxed);
                             match (i, open) {
@@ -576,11 +720,11 @@ async fn main(_spawner: embassy_executor::Spawner) {
                                     MENU_OPEN.store(true, Ordering::Relaxed);
                                     logln!("menu: open");
                                 }
-                                (3, true) => activate_menu_item(),
-                                (2, true) => {
+                                (3, true) => {
                                     MENU_OPEN.store(false, Ordering::Relaxed);
                                     logln!("menu: closed");
                                 }
+                                (_, true) => activate_menu_item(),
                                 _ => {}
                             }
                         }
@@ -655,7 +799,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
         screen.flush().await;
         Timer::after(SPLASH).await;
 
-        const VIEWS: u8 = 4;
+        const VIEWS: u8 = 5;
         const FRAME_MS: u64 = 40;
         let mut ticker = Ticker::every(Duration::from_millis(FRAME_MS));
         let mut last = None;
@@ -710,6 +854,23 @@ async fn main(_spawner: embassy_executor::Spawner) {
                 BATT_MV.store(millivolts, Ordering::Relaxed);
             }
             ticks = ticks.wrapping_add(1);
+            // Fifteen seconds on our feet: whatever the last boot panicked
+            // about, this boot is not in a loop over it.
+            if ticks == 375 {
+                clear_panic_box();
+            }
+            let pending = REQ_REBOOT.load(Ordering::Relaxed);
+            if pending != 0 {
+                logln!("rebooting into the bootloader ({})", bootloader_mode_label(pending));
+                ui::draw_flashing(&mut screen, bootloader_mode_label(pending));
+                if boost.on {
+                    screen.flush().await;
+                }
+                // Long enough for the frame to be on the glass and the log line
+                // to be on the wire.
+                Timer::after_millis(250).await;
+                reboot_to_bootloader(pending);
+            }
             if REQ_BOOST.swap(false, Ordering::Relaxed) {
                 if boost.on {
                     // Panel off before its rail, per the usual OLED ordering.
@@ -747,12 +908,16 @@ async fn main(_spawner: embassy_executor::Spawner) {
             let zoom = ZOOM.load(Ordering::Relaxed);
             let held = held_axis(&state.pressed);
 
+            // Anything the knob asked the printer for goes out as one move per
+            // frame, however fast it was turned.
+            gantry::flush_jogs();
+
             // Every jog since the last frame is a kick of torque. Sample the
             // deltas whatever view is up, so switching to the gantry doesn't
             // dump a hoarded spin into it.
             for axis in 0..3 {
                 let delta = counts[axis] - spun_counts[axis];
-                if delta != 0 && view == VIEW_GANTRY && !menu_open {
+                if delta != 0 && view == VIEW_CUBE && !menu_open {
                     cube.kick(axis, delta);
                 }
             }
@@ -771,10 +936,20 @@ async fn main(_spawner: embassy_executor::Spawner) {
                 counts,
                 axis,
                 zoom,
+                // The gantry screen is a view of the host's state, so it has to
+                // redraw when that changes and not when the puck's own does.
+                (
+                    gantry::position(0),
+                    gantry::position(1),
+                    gantry::position(2),
+                    gantry::state_label(),
+                    gantry::step_um(),
+                    gantry::homed(0) as u8 | (gantry::homed(1) as u8) << 1 | (gantry::homed(2) as u8) << 2,
+                ),
             );
             // A coasting cube changes with nothing else changing, so it gets a
             // frame of its own; every other view still draws only on change.
-            let coasting = spinning && view == VIEW_GANTRY && !menu_open;
+            let coasting = spinning && view == VIEW_CUBE && !menu_open;
             if force || coasting || last != Some(key) {
                 last = Some(key);
                 match (menu_open, view) {
@@ -786,10 +961,11 @@ async fn main(_spawner: embassy_executor::Spawner) {
                             vpp_on: state.vpp_on,
                             led: led_label(),
                             view: view_label(),
+                            step_um: gantry::step_um(),
                             millivolts: state.millivolts,
                         },
                     ),
-                    (false, VIEW_GANTRY) => ui::draw_cube(
+                    (false, VIEW_CUBE) => ui::draw_cube(
                         &mut screen,
                         &cube,
                         counts,
@@ -798,8 +974,11 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         state.millivolts,
                         state.vpp_on,
                     ),
-                    (false, 2) => ui::test_pattern(&mut screen),
-                    (false, 3) => ui::all_on(&mut screen),
+                    (false, VIEW_GANTRY) => {
+                        ui::draw_gantry(&mut screen, axis, state.millivolts, state.vpp_on)
+                    }
+                    (false, 3) => ui::test_pattern(&mut screen),
+                    (false, 4) => ui::all_on(&mut screen),
                     (false, _) => ui::draw(&mut screen, &state),
                 }
                 // Nothing to push while the panel has no rail.
@@ -837,6 +1016,44 @@ async fn main(_spawner: embassy_executor::Spawner) {
         }
     };
 
+    // A watchdog on the nRF52 survives a soft reset, so a build that starts one
+    // leaves it running for everything flashed afterwards - and a build that
+    // never heard of it just gets reset every 8 s, which cost us an afternoon.
+    // Two rules make that safe: whoever boots into a running watchdog feeds it,
+    // and only the radio build ever starts one, because only the radio can take
+    // the executor down with it.
+    let watchdog = async {
+        use embassy_nrf::peripherals::WDT;
+        use embassy_nrf::wdt::{Config as WdtConfig, Watchdog, WatchdogHandle};
+
+        let running = WdtConfig::try_new(&p.WDT).is_some();
+        let mut handle = if running {
+            logln!("wdt: one was already running - feeding it");
+            // SAFETY: reload register 0 is the one any build of ours enables.
+            Some(unsafe { WatchdogHandle::steal::<WDT>(0) })
+        } else if cfg!(feature = "ble") {
+            let mut wdt_config = WdtConfig::default();
+            // 32768 Hz ticks: eight seconds, far longer than any legitimate pause.
+            wdt_config.timeout_ticks = 8 * 32768;
+            match Watchdog::try_new::<_, 1>(p.WDT, wdt_config) {
+                Ok((_wdt, [handle])) => {
+                    logln!("wdt: 8 s, fed every second");
+                    Some(handle)
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        loop {
+            if let Some(handle) = handle.as_mut() {
+                handle.pet();
+            }
+            Timer::after_millis(1000).await;
+        }
+    };
+
     #[cfg(feature = "ble")]
     let wireless = async {
         let a = state::device_address();
@@ -871,7 +1088,14 @@ async fn main(_spawner: embassy_executor::Spawner) {
         .await
     };
 
-    join5(usb.run(), writer, inputs, render, join(commands, wireless)).await;
+    join5(
+        usb.run(),
+        writer,
+        inputs,
+        render,
+        join3(commands, wireless, watchdog),
+    )
+    .await;
 }
 
 /// Act on the highlighted menu row. Everything routes through the same request
@@ -888,6 +1112,14 @@ fn activate_menu_item() {
             LED_MODE.store(mode, Ordering::Relaxed);
         }
         ui::MenuItem::Screen => REQ_VIEW.store(true, Ordering::Relaxed),
+        ui::MenuItem::Step => {
+            let um = gantry::next_step();
+            logln!("menu: jog step {} mm", ui::Millimetres(um));
+        }
+        ui::MenuItem::Home => {
+            gantry::request("home");
+            logln!("menu: asked the bridge to home");
+        }
         // Nothing to activate: the row is the reading.
         ui::MenuItem::Battery => {}
         ui::MenuItem::Exit => {
@@ -901,17 +1133,181 @@ fn activate_menu_item() {
 /// the executor, so USB never comes up and the board looks dead until someone
 /// finds the reset button. This way a bad build is always one copy away from a
 /// good one.
+///
+/// It also writes the message down first. The reboot is what makes a panic
+/// survivable; keeping the text is what makes it debuggable - without it every
+/// panic looks identical from the outside, which is to say it looks like a
+/// board that died for no reason. MPSL's assert handler panics with a file and
+/// line, so this is the difference between "the radio hangs" and knowing
+/// exactly which assertion it tripped.
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    reboot_to_uf2()
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    // SAFETY: single core, and nothing else is running any more.
+    let previous = unsafe { &*(&raw const PANIC_BOX) };
+    let count = if previous.magic == PANIC_MAGIC {
+        previous.count.saturating_add(1)
+    } else {
+        1
+    };
+    let mut box_ = PanicBox {
+        magic: PANIC_MAGIC,
+        count,
+        len: 0,
+        text: [0; PANIC_TEXT],
+    };
+    let mut sink = PanicWriter {
+        text: &mut box_.text,
+        len: 0,
+    };
+    let _ = write!(sink, "{info}");
+    box_.len = sink.len as u32;
+    // SAFETY: single core, interrupts are irrelevant now, and nothing else
+    // touches this region - it is deliberately outside .bss so the reset does
+    // not clear it.
+    unsafe { (&raw mut PANIC_BOX).write(box_) };
+    // A plain reset keeps RAM, and RAM is where the message is: going straight
+    // to the bootloader hands it a machine whose memory it will scribble on.
+    // Two panics in a row is a build that isn't going to come good on its own,
+    // so that one goes to the bootloader and stays there.
+    if count >= 2 {
+        reboot_to_uf2()
+    }
+    cortex_m::peripheral::SCB::sys_reset()
+}
+
+const PANIC_MAGIC: u32 = 0x7069_636f;
+const PANIC_TEXT: usize = 192;
+
+#[repr(C)]
+struct PanicBox {
+    magic: u32,
+    /// Consecutive panics. A build that panics once wants to tell you why; a
+    /// build that panics every boot wants to be replaced.
+    count: u32,
+    len: u32,
+    text: [u8; PANIC_TEXT],
+}
+
+/// `.uninit` is RAM that cortex-m-rt leaves alone at startup, which is what
+/// lets a message cross a reset.
+#[unsafe(link_section = ".uninit.PANIC")]
+static mut PANIC_BOX: PanicBox = PanicBox {
+    magic: 0,
+    count: 0,
+    len: 0,
+    text: [0; PANIC_TEXT],
+};
+
+struct PanicWriter<'a> {
+    text: &'a mut [u8; PANIC_TEXT],
+    len: usize,
+}
+
+impl core::fmt::Write for PanicWriter<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for &byte in s.as_bytes() {
+            if self.len == PANIC_TEXT {
+                break;
+            }
+            self.text[self.len] = byte;
+            self.len += 1;
+        }
+        Ok(())
+    }
+}
+
+/// The message the last panic left, if the last boot ended in one. Taken, not
+/// read: a second report would be a lie about a boot that went fine.
+fn take_panic_message() -> Option<(u32, Line)> {
+    // SAFETY: as above, and this runs before any task could panic again.
+    let box_ = unsafe { &*(&raw const PANIC_BOX) };
+    if box_.magic != PANIC_MAGIC {
+        return None;
+    }
+    // The magic stays: `clear_panic_box` drops it once this boot has proved it
+    // can stay up, which is what makes `count` mean "in a row".
+    let len = (box_.len as usize).min(PANIC_TEXT);
+    let text = core::str::from_utf8(&box_.text[..len]).unwrap_or("<not utf8>");
+    Line::try_from(text).ok().map(|line| (box_.count, line))
+}
+
+/// Forget the last panic, once this boot has been up long enough to call it a
+/// good one.
+fn clear_panic_box() {
+    // SAFETY: as above.
+    unsafe { (&raw mut PANIC_BOX).write(PanicBox { magic: 0, count: 0, len: 0, text: [0; PANIC_TEXT] }) };
 }
 
 /// Reset into the bootloader's UF2 mode instead of back into this app.
+/// Why the chip came up, straight out of POWER.RESETREAS, and cleared so the
+/// next boot's answer is its own. On a board with no debugger this is the only
+/// thing that distinguishes "the watchdog got it", "the firmware asked for it"
+/// and "someone pressed reset" - and each of those wants a different fix.
+fn reset_reason() -> &'static str {
+    let power = embassy_nrf::pac::POWER;
+    let bits = power.resetreas().read().0;
+    // Write-one-to-clear: leaving it set makes every later boot lie.
+    power.resetreas().write_value(embassy_nrf::pac::power::regs::Resetreas(bits));
+    match bits {
+        0 => "power-on",
+        b if b & (1 << 1) != 0 => "watchdog",
+        b if b & (1 << 3) != 0 => "cpu lockup",
+        b if b & (1 << 2) != 0 => "soft reset",
+        b if b & (1 << 0) != 0 => "reset pin",
+        _ => "other",
+    }
+}
+
 fn reboot_to_uf2() -> ! {
+    reboot_to_bootloader(DFU_MAGIC_UF2_RESET)
+}
+
+/// Ask for a reboot rather than taking one: the render loop puts "FLASHING" on
+/// the screen, pushes the frame, and then jumps. A panic still resets straight
+/// away - by then there may be no render loop left to ask.
+fn request_reboot(magic: u8) {
+    REQ_REBOOT.store(magic, Ordering::Relaxed);
+}
+
+fn bootloader_mode_label(magic: u8) -> &'static str {
+    match magic {
+        DFU_MAGIC_OTA_RESET => "over the air",
+        DFU_MAGIC_SERIAL_ONLY_RESET => "serial DFU",
+        _ => "USB drive",
+    }
+}
+
+/// Leave a magic byte in GPREGRET - retained across a soft reset, cleared by a
+/// power-on one - and reset into the bootloader mode it names.
+fn reboot_to_bootloader(magic: u8) -> ! {
     embassy_nrf::pac::POWER
         .gpregret()
-        .write(|w| w.set_gpregret(DFU_MAGIC_UF2_RESET));
+        .write(|w| w.set_gpregret(magic));
     cortex_m::peripheral::SCB::sys_reset()
+}
+
+/// One line off the machine channel, whichever transport carried it. USB and
+/// BLE both land here so the host tool speaks one protocol either way.
+fn machine_line(line: &str) {
+    let mut fields = line.split_ascii_whitespace();
+    match fields.next() {
+        // Reboot into a bootloader mode by name, so a host can start an update
+        // without anyone touching the reset button.
+        Some("r") | Some("#r") => {
+            let magic = match fields.next() {
+                Some("ota") => DFU_MAGIC_OTA_RESET,
+                Some("serial") => DFU_MAGIC_SERIAL_ONLY_RESET,
+                Some("uf2") | None => DFU_MAGIC_UF2_RESET,
+                Some(other) => {
+                    logln!("reset: unknown mode {other}");
+                    return;
+                }
+            };
+            proto!("#b {magic:#04x}");
+            request_reboot(magic)
+        }
+        _ => gantry::handle_line(line),
+    }
 }
 
 /// Write to the host, dropping the text if nobody is draining the port.
