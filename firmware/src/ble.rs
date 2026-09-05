@@ -16,7 +16,7 @@
 //! which is why this and [`crate::radio`] are mutually exclusive builds.
 
 use embassy_futures::join::join3;
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either3, select3};
 use embassy_nrf::mode::Async;
 use embassy_nrf::rng::{self, Rng};
 use embassy_nrf::{Peri, bind_interrupts, peripherals};
@@ -49,8 +49,14 @@ const NOTIFY_INTERVAL: Duration = Duration::from_millis(100);
 /// buffers; `build()` reports it if that is ever wrong.
 const SDC_MEM_SIZE: usize = 4096;
 
-/// 128-bit UUIDs, randomly chosen: a puck service with one state characteristic.
-/// The macros want literals, so they live here rather than in named constants.
+/// One notification's worth of a line. The default ATT MTU is 23, so 20 bytes
+/// is what fits without assuming the central negotiated anything larger; longer
+/// lines simply take more notifications and the host reassembles on the newline.
+const CHUNK: usize = 20;
+
+/// 128-bit UUIDs, randomly chosen: a puck service carrying the state snapshot
+/// and the machine channel. The macros want literals, so they live here rather
+/// than in named constants.
 #[gatt_service(uuid = "9f4a0000-1d2b-4c65-9c31-7f9a2b0d5e01")]
 struct PuckService {
     /// The same eight bytes the advertiser carries: format, seq, buttons,
@@ -58,11 +64,44 @@ struct PuckService {
     /// doesn't have to.
     #[characteristic(uuid = "9f4a0001-1d2b-4c65-9c31-7f9a2b0d5e01", read, notify)]
     state: [u8; ENCODED_LEN],
+
+    /// Host to puck, the same `#`-lines the USB console takes: writes are
+    /// concatenated until a newline, then dispatched exactly as if they had
+    /// arrived over the wire. Write-without-response so a jog burst doesn't
+    /// wait for an ack it has no use for.
+    #[characteristic(uuid = "9f4a0002-1d2b-4c65-9c31-7f9a2b0d5e01", write, write_without_response)]
+    rx: [u8; CHUNK],
+
+    /// Puck to host: the same lines going the other way, in [`CHUNK`] pieces.
+    #[characteristic(uuid = "9f4a0003-1d2b-4c65-9c31-7f9a2b0d5e01", notify)]
+    tx: heapless::Vec<u8, CHUNK>,
 }
 
-#[gatt_server(connections_max = CONNECTIONS_MAX, attribute_table_size = 64)]
+#[gatt_server(connections_max = CONNECTIONS_MAX, attribute_table_size = 128)]
 struct Server {
     puck: PuckService,
+}
+
+/// Reassemble host writes into lines. A line longer than this is not one of
+/// ours, so it gets dropped rather than parsed in halves.
+#[derive(Default)]
+struct LineBuffer {
+    line: heapless::String<96>,
+}
+
+impl LineBuffer {
+    fn feed(&mut self, data: &[u8]) {
+        for &byte in data {
+            if byte == b'\n' || byte == b'\r' {
+                if !self.line.is_empty() {
+                    crate::machine_line(&self.line);
+                    self.line.clear();
+                }
+            } else if self.line.push(byte as char).is_err() {
+                self.line.clear();
+            }
+        }
+    }
 }
 
 /// The peripherals MPSL and SDC claim, handed over in one move so `main` can't
@@ -121,20 +160,46 @@ pub async fn run<F: FnMut() -> Payload>(p: Claimed, snapshot: F) -> ! {
 }
 
 async fn try_run<F: FnMut() -> Payload>(p: Claimed, mut snapshot: F) -> Result<(), sdc::Error> {
+    // The RC source, matching what is actually running: embassy starts the LFCLK
+    // for its RTC1 time driver long before we get here, and it starts it on RC.
     let lfclk = mpsl::raw::mpsl_clock_lfclk_cfg_t {
         source: mpsl::raw::MPSL_CLOCK_LF_SRC_RC as u8,
         rc_ctiv: mpsl::raw::MPSL_RECOMMENDED_RC_CTIV as u8,
         rc_temp_ctiv: mpsl::raw::MPSL_RECOMMENDED_RC_TEMP_CTIV as u8,
         // What the recommended calibration cadence above buys you.
         accuracy_ppm: 500,
-        skip_wait_lfclk_started: false,
+        // Don't block inside `mpsl_init` waiting for the LFCLK to report
+        // started: that wait is serviced by the CLOCK_POWER interrupt, whose
+        // priority MPSL only sets *after* init returns, and on this build it
+        // never came back. The clock starts either way; the stack just doesn't
+        // sit on the CPU waiting for it.
+        skip_wait_lfclk_started: true,
     };
 
     crate::LINK_STATE.store(1, core::sync::atomic::Ordering::Relaxed);
     step("mpsl init").await;
     let mpsl_p = MpslPeripherals::new(p.rtc0, p.timer0, p.temp, p.ppi_ch19, p.ppi_ch30, p.ppi_ch31);
     static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
+
+    // What the clocks are doing on the way in. embassy starts the LFCLK for its
+    // RTC1 time driver during `init`, so by the time we get here it is already
+    // running on RC - measured on the bench: stat 0x00010000, src 0. That is
+    // worth printing every time, because `mpsl_init` below does not return on
+    // this board and the clock state is the first thing the next attempt at it
+    // will want to know. Stopping the LFCLK first was tried, and did not help.
+    {
+        let clock = embassy_nrf::pac::CLOCK;
+        crate::logln!(
+            "ble: lfclk stat={:#010x} src={:#x}, hfclk stat={:#010x}",
+            clock.lfclkstat().read().0,
+            clock.lfclksrc().read().0,
+            clock.hfclkstat().read().0,
+        );
+        Timer::after_millis(80).await;
+    }
+
     let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, lfclk)?);
+    step("mpsl up").await;
 
     step("controller init").await;
     let sdc_p = SdcPeripherals::new(
@@ -208,22 +273,34 @@ async fn try_run<F: FnMut() -> Payload>(p: Claimed, mut snapshot: F) -> Result<(
             crate::LINK_STATE.store(3, core::sync::atomic::Ordering::Relaxed);
             crate::logln!("ble: connected");
 
+            let mut incoming = LineBuffer::default();
             loop {
-                match select(conn.next(), Timer::after(NOTIFY_INTERVAL)).await {
-                    Either::First(GattConnectionEvent::Disconnected { reason }) => {
+                let next = select3(
+                    conn.next(),
+                    Timer::after(NOTIFY_INTERVAL),
+                    crate::WIRE.receive(),
+                );
+                match next.await {
+                    Either3::First(GattConnectionEvent::Disconnected { reason }) => {
                         crate::logln!("ble: disconnected, reason {:?}", reason);
                         crate::LINK_STATE.store(2, core::sync::atomic::Ordering::Relaxed);
                         break;
                     }
-                    Either::First(GattConnectionEvent::Gatt { event }) => {
-                        // Nothing here is gated on permissions, so every request
-                        // is simply served.
+                    Either3::First(GattConnectionEvent::Gatt { event }) => {
+                        // The machine channel is the only write we care about;
+                        // nothing here is gated on permissions, so every request
+                        // is served either way.
+                        if let GattEvent::Write(write) = &event {
+                            if write.handle() == server.puck.rx.handle {
+                                write.with_data(|_, data| incoming.feed(data));
+                            }
+                        }
                         if let Ok(reply) = event.accept() {
                             reply.send().await;
                         }
                     }
-                    Either::First(_) => {}
-                    Either::Second(()) => {
+                    Either3::First(_) => {}
+                    Either3::Second(()) => {
                         let encoded = snapshot().encode();
                         if server
                             .puck
@@ -232,6 +309,22 @@ async fn try_run<F: FnMut() -> Payload>(p: Claimed, mut snapshot: F) -> Result<(
                             .await
                             .is_err()
                         {
+                            break;
+                        }
+                    }
+                    // A protocol line the puck wants to send, in MTU-sized
+                    // pieces. The host joins them up again on the newline.
+                    Either3::Third(line) => {
+                        let mut failed = false;
+                        for chunk in line.as_bytes().chunks(CHUNK) {
+                            let piece = heapless::Vec::<u8, CHUNK>::from_slice(chunk)
+                                .unwrap_or_default();
+                            if server.puck.tx.notify(&conn, &piece, true).await.is_err() {
+                                failed = true;
+                                break;
+                            }
+                        }
+                        if failed {
                             break;
                         }
                     }
