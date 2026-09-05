@@ -97,10 +97,11 @@ const SPLASH: Duration = Duration::from_millis(1500);
 const SWITCH_NAMES: [&str; 4] = ["BTN1", "BTN2", "BTN3", "ENC_SW"];
 
 const HELP: &str = concat!(
-    "\r\ncommands: ? help | p pins | d cycle view (live/pattern/all-on)\r\n",
+    "\r\ncommands: ? help | p pins | d cycle view (live/gantry/pattern/all-on)\r\n",
     "          i re-init display | f flip 180 | +/- contrast | e 12V rail\r\n",
     "          w wireless | m menu (knob moves, knob press acts, BTN3 backs out)\r\n",
     "          1/2/3 select axis (Z/X/Y, as the buttons do) | , . jog it\r\n",
+    "          gantry: hold 1/2/3 to jog+spin that axis, knob alone zooms\r\n",
     "          l led (dark/dim/on) | v verbose | b bootloader\r\n"
 );
 
@@ -127,6 +128,9 @@ static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 static MENU_SEL: AtomicU8 = AtomicU8::new(0);
 /// 0 = live inputs, 1 = gantry/cube, 2 = orientation pattern, 3 = all pixels on.
 static VIEW: AtomicU8 = AtomicU8::new(0);
+const VIEW_GANTRY: u8 = 1;
+/// Gantry zoom, in detents off the resting size - see [`cube::zoom_scale`].
+static ZOOM: AtomicI32 = AtomicI32::new(0);
 
 /// The device's control model: three jog counters, one selected axis. The knob
 /// drives the selected counter, BTN1/2/3 choose which. Everything on screen is
@@ -171,6 +175,12 @@ fn view_label() -> &'static str {
         3 => "all-on",
         _ => "live",
     }
+}
+
+/// Which axis the knob is driving right now on the gantry screen: the first of
+/// BTN1/2/3 held down, or nothing, which is what makes the knob a zoom.
+fn held_axis(pressed: &[bool; 4]) -> Option<usize> {
+    (0..3).find(|&i| pressed[i]).map(|i| BUTTON_AXIS[i])
 }
 
 fn axis_counts() -> [i32; 3] {
@@ -489,16 +499,41 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         } else {
                             detents += direction;
                             DETENTS.store(detents, Ordering::Relaxed);
-                            // The knob's real job: jog the selected axis.
-                            let axis = AXIS.load(Ordering::Relaxed) as usize % 3;
-                            let jogged =
-                                AXIS_COUNTS[axis].fetch_add(direction, Ordering::Relaxed)
-                                    + direction;
-                            logln!(
-                                "ENC {} {}={jogged} detents={detents}",
-                                if direction > 0 { "cw " } else { "ccw" },
-                                ui::AXIS_NAMES[axis]
-                            );
+                            // On the gantry screen the buttons are momentary:
+                            // the knob only jogs while an axis is held down, and
+                            // with nothing held it zooms the view instead.
+                            // Everywhere else BTN1/2/3 stay a latched select.
+                            let gantry = VIEW.load(Ordering::Relaxed) == VIEW_GANTRY;
+                            let held = held_axis(&pressed);
+                            let axis = match (gantry, held) {
+                                (true, None) => None,
+                                (true, some) => some,
+                                (false, _) => {
+                                    Some(AXIS.load(Ordering::Relaxed) as usize % 3)
+                                }
+                            };
+                            match axis {
+                                Some(axis) => {
+                                    // The knob's real job: jog the chosen axis.
+                                    let jogged = AXIS_COUNTS[axis]
+                                        .fetch_add(direction, Ordering::Relaxed)
+                                        + direction;
+                                    logln!(
+                                        "ENC {} {}={jogged} detents={detents}",
+                                        if direction > 0 { "cw " } else { "ccw" },
+                                        ui::AXIS_NAMES[axis]
+                                    );
+                                }
+                                None => {
+                                    let zoom = (ZOOM.load(Ordering::Relaxed) + direction)
+                                        .clamp(cube::ZOOM_MIN, cube::ZOOM_MAX);
+                                    ZOOM.store(zoom, Ordering::Relaxed);
+                                    logln!(
+                                        "ENC {} zoom={zoom} detents={detents}",
+                                        if direction > 0 { "cw " } else { "ccw" }
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -621,9 +656,17 @@ async fn main(_spawner: embassy_executor::Spawner) {
         Timer::after(SPLASH).await;
 
         const VIEWS: u8 = 4;
-        let mut ticker = Ticker::every(Duration::from_millis(40));
+        const FRAME_MS: u64 = 40;
+        let mut ticker = Ticker::every(Duration::from_millis(FRAME_MS));
         let mut last = None;
         let mut ticks: u32 = 0;
+
+        // The cube keeps the only state the counters can't express: how fast it
+        // is spinning. Jogs reach it as deltas, so the knob and the console `,`
+        // `.` keys both land as torque and the counters stay the single copy of
+        // position.
+        let mut cube = cube::Cube::new();
+        let mut spun_counts = axis_counts();
 
         loop {
             let mut force = false;
@@ -701,6 +744,21 @@ async fn main(_spawner: embassy_executor::Spawner) {
             let view = VIEW.load(Ordering::Relaxed);
             let counts = axis_counts();
             let axis = AXIS.load(Ordering::Relaxed) as usize % 3;
+            let zoom = ZOOM.load(Ordering::Relaxed);
+            let held = held_axis(&state.pressed);
+
+            // Every jog since the last frame is a kick of torque. Sample the
+            // deltas whatever view is up, so switching to the gantry doesn't
+            // dump a hoarded spin into it.
+            for axis in 0..3 {
+                let delta = counts[axis] - spun_counts[axis];
+                if delta != 0 && view == VIEW_GANTRY && !menu_open {
+                    cube.kick(axis, delta);
+                }
+            }
+            spun_counts = counts;
+            let spinning = cube.step(FRAME_MS as f32 / 1000.0);
+
             let key = (
                 state.detents,
                 PRESSED.load(Ordering::Relaxed),
@@ -712,8 +770,12 @@ async fn main(_spawner: embassy_executor::Spawner) {
                 LINK_STATE.load(Ordering::Relaxed),
                 counts,
                 axis,
+                zoom,
             );
-            if force || last != Some(key) {
+            // A coasting cube changes with nothing else changing, so it gets a
+            // frame of its own; every other view still draws only on change.
+            let coasting = spinning && view == VIEW_GANTRY && !menu_open;
+            if force || coasting || last != Some(key) {
                 last = Some(key);
                 match (menu_open, view) {
                     (true, _) => ui::draw_menu(
@@ -727,9 +789,15 @@ async fn main(_spawner: embassy_executor::Spawner) {
                             millivolts: state.millivolts,
                         },
                     ),
-                    (false, 1) => {
-                        ui::draw_cube(&mut screen, counts, axis, state.millivolts, state.vpp_on)
-                    }
+                    (false, VIEW_GANTRY) => ui::draw_cube(
+                        &mut screen,
+                        &cube,
+                        counts,
+                        held,
+                        zoom,
+                        state.millivolts,
+                        state.vpp_on,
+                    ),
                     (false, 2) => ui::test_pattern(&mut screen),
                     (false, 3) => ui::all_on(&mut screen),
                     (false, _) => ui::draw(&mut screen, &state),

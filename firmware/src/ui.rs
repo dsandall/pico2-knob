@@ -248,13 +248,22 @@ pub fn all_on(d: &mut Display<'_>) {
 pub const AXIS_NAMES: [&str; 3] = ["X", "Y", "Z"];
 
 /// The gantry screen: a wireframe cube standing in for the machine, and the
-/// three jog counters with the selected axis highlighted. Turn the knob to jog
-/// the selected axis; BTN1/2/3 pick which one.
-pub fn draw_cube(d: &mut Display<'_>, counts: [i32; 3], selected: usize, millivolts: u16, vpp_on: bool) {
+/// three jog counters with the held axis highlighted. Here the buttons are
+/// momentary - hold BTN1/2/3 and the knob jogs that axis and spins the cube
+/// about it; with nothing held the knob zooms instead.
+pub fn draw_cube(
+    d: &mut Display<'_>,
+    cube: &crate::cube::Cube,
+    counts: [i32; 3],
+    held: Option<usize>,
+    zoom: i32,
+    millivolts: u16,
+    vpp_on: bool,
+) {
     d.clear();
     header(d, millivolts, vpp_on);
 
-    crate::cube::Cube::from_counts(counts).wireframe(d);
+    cube.wireframe(d, zoom);
 
     let fill = PrimitiveStyle::with_fill(BinaryColor::On);
     let on = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
@@ -265,11 +274,28 @@ pub fn draw_cube(d: &mut Display<'_>, counts: [i32; 3], selected: usize, millivo
         .alignment(Alignment::Center)
         .build();
 
+    // Zoom only when it's off its default, so the usual screen stays clean.
+    if zoom != 0 {
+        let hundredths = (crate::cube::zoom_scale(zoom) * 100.0) as i32;
+        let mut label: String<12> = String::new();
+        let _ = write!(label, "x{}.{:02}", hundredths / 100, hundredths % 100);
+        let _ = Text::with_text_style(
+            &label,
+            Point::new(126, 99),
+            small,
+            TextStyleBuilder::new()
+                .baseline(Baseline::Middle)
+                .alignment(Alignment::Right)
+                .build(),
+        )
+        .draw(d);
+    }
+
     // One box per axis, in button order, showing its jog count.
     for (slot, &axis) in crate::BUTTON_AXIS.iter().enumerate() {
         let origin = Point::new(2 + 42 * slot as i32, 106);
         let rect = Rectangle::new(origin, Size::new(40, 20));
-        let active = axis == selected;
+        let active = Some(axis) == held;
         let _ = rect.into_styled(if active { fill } else { on }).draw(d);
         let style = if active { small_inv } else { small };
 
