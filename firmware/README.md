@@ -70,7 +70,7 @@ Single-key commands:
 | `?`   | help                                                                |
 | `p`   | inputs, detents, 12V_EN, battery, link state                        |
 | `m`   | open/close the on-screen menu (handy without hands on the puck)     |
-| `d`   | cycle view: live / gantry cube / orientation pattern / all pixels on |
+| `d`   | cycle view: live / cube / gantry / orientation pattern / all pixels on |
 | `i`   | re-init the display (reset + full init sequence)                    |
 | `f`   | flip the panel 180 degrees (COM/segment remap)                      |
 | `+`/`-` | contrast, in steps of 0x10 from the vendor default 0x4F           |
@@ -79,6 +79,7 @@ Single-key commands:
 | `v`   | verbose: log every encoder quadrature transition, not just detents  |
 | `l`   | LED: dark / dim heartbeat / on                                      |
 | `b`   | reboot into the UF2 bootloader                                      |
+| `#…`  | the machine channel — a line for the gantry bridge, not a keystroke |
 
 ## The control model
 
@@ -90,21 +91,108 @@ Button-to-axis mapping lives in one line, `BUTTON_AXIS`, currently `Z, X, Y` in
 button order; a build that wants `X, Y, Z` changes only that. The console can
 drive the same model without hands on the puck: `1`/`2`/`3` select, `,`/`.` jog.
 
-The **gantry view** (second in the `d` cycle) renders those counters as a
-rotating wireframe cube, with the three counts along the bottom and the selected
-axis inverted. Hidden-line removal on a convex solid is just backface culling:
-an edge is drawn exactly when at least one of the two faces meeting at it faces
-the camera, so silhouette edges appear once and the three edges meeting at the
-far corner never appear at all. It uses f32 and `libm` rather than fixed point,
-because the Cortex-M4F has a single-precision FPU. 7.5 degrees per detent.
+The **cube view** (second in the `d` cycle) renders those counters as a rotating
+wireframe cube, with the three counts along the bottom. Hidden-line removal on a
+convex solid is just backface culling: an edge is drawn exactly when at least one
+of the two faces meeting at it faces the camera, so silhouette edges appear once
+and the three edges meeting at the far corner never appear at all. It uses f32
+and `libm` rather than fixed point, because the Cortex-M4F has a single-precision
+FPU.
+
+The cube's buttons are **momentary**, unlike everywhere else: hold BTN1/2/3 and
+the knob jogs that axis and spins the cube about it, and with nothing held the
+knob zooms. The knob applies **torque, not position** — a detent adds angular
+momentum (about 0.52 rad/s), light drag bleeds it off with a ~5 s half-life, so a
+flick sets it coasting and a counter-flick stops it.
+
+The **gantry view** (third) is the real machine rather than a model of it — see
+below.
 
 ## On the puck itself
 
-- **Press the knob** to open the menu, **turn** to move, **press** to act,
-  **BTN3** to back out. Rows: `ble`, `12V rail`, `led`, `screen`, `battery`,
-  `exit` — each showing its current value on the right.
+- **Press the knob** to open the menu, **turn** to move, **BTN1/2/3** to select,
+  **press the knob again** to leave — it's the same gesture in and out. Rows: `ble`, `12V rail`, `led`, `screen`, `jog step`,
+  `home all`, `battery`, `exit` — each showing its current value on the right.
 - The title bar carries a battery gauge and a `12V` flag; the live view shows
   the encoder ring, the detent count, the link state and a pip per button.
+
+## Driving a real printer
+
+`tools/pico2joy.py` is the one host-side program: it finds the puck on USB or
+BLE and speaks the same line protocol either way.
+
+```
+tools/pico2joy.py scan            # what can see the puck right now
+tools/pico2joy.py monitor         # console passthrough
+tools/pico2joy.py gantry          # drive a Klipper gantry with the knob
+tools/pico2joy.py flash out/pico2joy-bringup.uf2   # reflash, no reset button
+tools/pico2joy.py reset uf2|serial|ota             # into a bootloader mode
+```
+
+Standard library only for everything over USB — the printer's system Python has
+no pyserial, and a bring-up tool that needs a venv is a tool that doesn't get
+run. BLE needs `bleak`, declared inline, so `uv run tools/pico2joy.py …` fetches
+it and nothing else has to be installed.
+
+Nobody here is a server. The program is a *client* of everything: it opens the
+puck's port (or connects to it as a BLE central) and makes HTTP requests to
+Moonraker, which is the only real server in the picture. So it runs wherever the
+puck is attached — the printer host, or a workstation — with no listening
+socket and no discovery. The one hard rule is that a serial port and a BLE
+connection each have exactly one owner, so one copy of it owns the puck at a
+time.
+
+`gantry` is the relay:
+
+```
+scp tools/pico2joy.py sovol@spi-xi:~/pico2joy/     # plug the puck in there
+ssh sovol@spi-xi 'python3 ~/pico2joy/pico2joy.py gantry'   # localhost Moonraker
+```
+
+Moonraker only trusts requests from its `trusted_clients`, which is why the
+relay is happiest on the printer. To run it from a workstation instead, pass
+`--api-key`, add that host to `trusted_clients`, or let the tool tunnel the port
+so the request arrives from localhost:
+
+```
+ssh -N -L 17125:127.0.0.1:7125 sovol@spi-xi        # by hand, or:
+tools/pico2joy.py gantry --tunnel sovol@spi-xi     # does the forwarding for you
+```
+
+The puck is a **view of the machine, never a second copy of it**. Positions and
+limits come from the printer; a detent produces a jog *request*, and the number
+on screen doesn't move until Klipper reports that the head did. A jog that gets
+refused — unhomed axis, mid-print, outside the travel — simply doesn't happen,
+instead of leaving the puck lying about where the nozzle is.
+
+Both directions share the console port. `#` opens a line on the machine channel;
+every other byte is still a single-key command. Values are integer micrometres,
+so neither end rounds twice:
+
+| direction | line | meaning |
+|-----------|------|---------|
+| host → puck | `#s <x> <y> <z> <homed-bits> <state>` | toolhead state, ~8 Hz |
+| host → puck | `#l <xmin> <xmax> <ymin> <ymax> <zmin> <zmax>` | travel limits |
+| host → puck | `#?` | identify |
+| puck → host | `#j <axis> <delta-um>` | jog request |
+| puck → host | `#c home` / `#c home_z` / `#c stop` | named command |
+| puck → host | `#v 1` | identify reply |
+
+No `#s` for 1.2 s and the screen says `offline` rather than showing a stale pose.
+Jogs are coalesced one frame at a time, so spinning the knob fast becomes one
+move rather than a queue of them, and they go out as a saved-state relative move:
+
+```
+SAVE_GCODE_STATE NAME=pico2joy_jog
+G91
+G1 X0.100 F6000
+RESTORE_GCODE_STATE NAME=pico2joy_jog
+```
+
+On the gantry screen **BTN1/2/3 are X/Y/Z** (not the cube's `BUTTON_AXIS` order),
+the knob jogs the selected axis by the step size from the menu (0.01 / 0.1 / 1 /
+10 mm), and `home all` in the menu sends `#c home`. Each axis shows its position,
+its travel as a bar with the head's place in it, and dashes if it isn't homed.
 
 ## Battery
 
