@@ -1,0 +1,27 @@
+[Unit]
+# The pico2joy knob, relaying jogs into Klipper. Wants rather than Requires
+# moonraker: the relay is happy to sit and retry, and a printer that comes up
+# without the puck plugged in is a normal Tuesday.
+Description=pico2joy gantry relay
+Documentation=https://github.com/softek/pico2-knob
+Wants=moonraker.service
+After=moonraker.service network-online.target
+
+[Service]
+Type=simple
+User=sovol
+Group=sovol
+WorkingDirectory=/home/sovol/pico2joy
+# Moonraker is localhost here, so no tunnel and no API key: this host is already
+# in its trusted_clients.
+ExecStart=/usr/bin/python3 /home/sovol/pico2joy/pico2joy.py --link usb gantry --moonraker http://127.0.0.1:7125 --wait-for-puck
+# The relay reopens the port itself when the puck re-enumerates; this is for the
+# cases it can't recover from, like the puck being unplugged for a long while.
+Restart=always
+RestartSec=5
+# Nothing here needs to write outside its own directory.
+ProtectSystem=full
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

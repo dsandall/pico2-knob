@@ -7,15 +7,17 @@ cd "$(dirname "$0")"
 
 FEATURES=()
 FLASH=0
+DFU=0
 NAME=pico2joy-bringup
 for arg in "$@"; do
   case "$arg" in
     --flash) FLASH=1 ;;
+    --dfu) DFU=1 ;;
     --offset-1000) FEATURES+=(--features app-offset-1000); NAME=pico2joy-bringup-0x1000 ;;
     # The BLE build needs MPSL's critical-section implementation instead of the
     # single-core one, which means dropping the default features.
     --ble) FEATURES+=(--no-default-features --features ble); NAME=pico2joy-bringup-ble ;;
-    *) echo "usage: $0 [--flash] [--ble] [--offset-1000]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--flash] [--dfu] [--ble] [--offset-1000]" >&2; exit 2 ;;
   esac
 done
 
@@ -29,6 +31,14 @@ rust-objcopy -O binary "$ELF" "$OUT/$NAME.bin"
 cargo-hex-to-uf2 hex-to-uf2 -i "$OUT/$NAME.hex" -o "$OUT/$NAME.uf2" -f nrf52840
 rust-size "$ELF"
 ls -l "$OUT/$NAME.uf2"
+
+# A DFU package is what the bootloader's over-the-air update wants: the same
+# image, plus the init packet naming the device type. 0x0052 is the nRF52840.
+if [[ $DFU == 1 ]]; then
+  adafruit-nrfutil dfu genpkg --dev-type 0x0052 \
+    --application "$OUT/$NAME.hex" "$OUT/$NAME-dfu.zip"
+  ls -l "$OUT/$NAME-dfu.zip"
+fi
 
 if [[ $FLASH == 1 ]]; then
   exec ./flash.sh "$ELF"
