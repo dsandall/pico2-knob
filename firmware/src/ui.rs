@@ -674,3 +674,91 @@ pub fn test_pattern(d: &mut Display<'_>) {
     )
     .draw(d);
 }
+
+/// The now-playing screen: the cover as a full-screen background with a dark
+/// footer carrying title, artist and volume. A view of the host's player - see
+/// [`crate::media`] - so with no bridge talking it says so rather than showing a
+/// stale track. Buttons are transport (prev / play-pause / next), the knob is
+/// volume.
+pub fn draw_nowplaying(
+    d: &mut Display<'_>,
+    status: u8,
+    volume: u8,
+    title: &str,
+    artist: &str,
+    art: Option<&[u8; crate::media::ART_BYTES]>,
+    online: bool,
+) {
+    let on = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let black = PrimitiveStyle::with_fill(BinaryColor::Off);
+    let white = PrimitiveStyle::with_fill(BinaryColor::On);
+    let small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let top_left = TextStyleBuilder::new().baseline(Baseline::Top).build();
+    let centred = TextStyleBuilder::new()
+        .baseline(Baseline::Middle)
+        .alignment(Alignment::Center)
+        .build();
+
+    match art {
+        Some(bitmap) => d.blit_raw(bitmap),
+        None => d.clear(),
+    }
+
+    if !online {
+        // Wipe any old cover so the message stands alone.
+        let _ = Rectangle::new(Point::new(0, 0), Size::new(128, 128))
+            .into_styled(black)
+            .draw(d);
+        let _ = Text::with_text_style("no bridge", Point::new(64, 58), small, centred).draw(d);
+        let _ = Text::with_text_style(
+            "run pico2joy.py spotify",
+            Point::new(64, 72),
+            small,
+            centred,
+        )
+        .draw(d);
+        return;
+    }
+
+    // A dark footer so the text reads over any cover.
+    const TOP: i32 = 97;
+    let _ = Rectangle::new(Point::new(0, TOP + 1), Size::new(128, 30))
+        .into_styled(black)
+        .draw(d);
+    let _ = Line::new(Point::new(0, TOP), Point::new(127, TOP))
+        .into_styled(on)
+        .draw(d);
+
+    // A transport glyph, drawn rather than lettered so it reads at a glance.
+    match status {
+        crate::media::STATE_PLAYING => {
+            for i in 0..7 {
+                let _ = Line::new(Point::new(2 + i / 2, 100 + i), Point::new(2 + i / 2, 106 - i))
+                    .into_styled(on)
+                    .draw(d);
+            }
+        }
+        crate::media::STATE_PAUSED => {
+            let _ = Rectangle::new(Point::new(2, 100), Size::new(2, 7)).into_styled(white).draw(d);
+            let _ = Rectangle::new(Point::new(6, 100), Size::new(2, 7)).into_styled(white).draw(d);
+        }
+        _ => {
+            let _ = Rectangle::new(Point::new(2, 100), Size::new(6, 6)).into_styled(white).draw(d);
+        }
+    }
+
+    // Title next to the glyph, artist below. Both clip at the right edge.
+    let _ = Text::with_text_style(title, Point::new(12, 100), small, top_left).draw(d);
+    let _ = Text::with_text_style(artist, Point::new(2, 110), small, top_left).draw(d);
+
+    // Volume as a bar along the bottom, when the bridge reports one.
+    if volume <= 100 {
+        let _ = Rectangle::new(Point::new(2, 122), Size::new(124, 4))
+            .into_styled(on)
+            .draw(d);
+        let fill = (124u32 * volume as u32 / 100).max(1);
+        let _ = Rectangle::new(Point::new(2, 122), Size::new(fill, 4))
+            .into_styled(white)
+            .draw(d);
+    }
+}

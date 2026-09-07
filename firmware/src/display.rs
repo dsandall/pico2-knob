@@ -110,6 +110,16 @@ impl<'d> Display<'d> {
         self.fb.fill(0);
     }
 
+    /// Replace the whole framebuffer with bytes already in the panel's layout.
+    ///
+    /// This is the fast path for a full-screen bitmap the host has packed to
+    /// match: 16 pages of 128 columns, D0 at the top, and the same logical->panel
+    /// rotation [`Self::set_pixel`] applies, so text drawn afterwards through the
+    /// normal path lands on top in the right place. A cover, in other words.
+    pub fn blit_raw(&mut self, buf: &[u8; COLS * PAGES]) {
+        self.fb.copy_from_slice(buf);
+    }
+
     /// Writes one logical pixel, rotating it into the panel's frame.
     ///
     /// This panel's RAM sits 90 degrees to the glass: an SH1107 page runs along

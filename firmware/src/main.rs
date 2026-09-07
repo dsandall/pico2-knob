@@ -36,6 +36,7 @@
 #[cfg(feature = "ble")]
 mod ble;
 mod accel;
+mod media;
 mod cube;
 mod display;
 mod gantry;
@@ -184,11 +185,12 @@ static BATT_MV: AtomicU16 = AtomicU16::new(0);
 static LINK_STATE: AtomicU8 = AtomicU8::new(0);
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 static MENU_SEL: AtomicU8 = AtomicU8::new(0);
-/// 0 = live inputs, 1 = the cube, 2 = the real gantry, 3 = orientation pattern,
-/// 4 = all pixels on.
+/// 0 = live inputs, 1 = the cube, 2 = the real gantry, 3 = now playing,
+/// 4 = orientation pattern, 5 = all pixels on.
 static VIEW: AtomicU8 = AtomicU8::new(0);
 const VIEW_CUBE: u8 = 1;
 const VIEW_GANTRY: u8 = 2;
+const VIEW_MUSIC: u8 = 3;
 /// Gantry zoom, in detents off the resting size - see [`cube::zoom_scale`].
 static ZOOM: AtomicI32 = AtomicI32::new(0);
 /// Whether the gantry screen spells its positions out. The frame shows you
@@ -262,8 +264,9 @@ fn view_label() -> &'static str {
     match VIEW.load(Ordering::Relaxed) {
         VIEW_CUBE => "cube",
         VIEW_GANTRY => "gantry",
-        3 => "pattern",
-        4 => "all-on",
+        VIEW_MUSIC => "music",
+        4 => "pattern",
+        5 => "all-on",
         _ => "live",
     }
 }
@@ -727,6 +730,11 @@ async fn main(_spawner: embassy_executor::Spawner) {
                                 let sel = WHEEL_SEL.load(Ordering::Relaxed) as i32;
                                 let next = (sel + direction).rem_euclid(count);
                                 WHEEL_SEL.store(next as u8, Ordering::Relaxed);
+                            } else if view == VIEW_MUSIC {
+                                // The knob is the volume; the host decides how
+                                // loud one detent is.
+                                media::volume(direction);
+                                logln!("music: vol {}", if direction > 0 { "up" } else { "down" });
                             } else {
                                 // On the cube screen the buttons are momentary: the
                                 // knob only spins an axis while it is held down, and
@@ -847,6 +855,20 @@ async fn main(_spawner: embassy_executor::Spawner) {
 
                         // BTN1/2/3 pick the axis the knob jogs, unless the menu
                         // has the buttons.
+                        // On the now-playing screen the three buttons are
+                        // transport, not axis select: BTN1 previous, BTN2
+                        // play/pause, BTN3 next.
+                        if down && i < 3
+                            && VIEW.load(Ordering::Relaxed) == VIEW_MUSIC
+                            && !MENU_OPEN.load(Ordering::Relaxed)
+                        {
+                            match i {
+                                0 => { media::prev(); logln!("music: prev"); }
+                                1 => { media::play_pause(); logln!("music: play/pause"); }
+                                _ => { media::next(); logln!("music: next"); }
+                            }
+                        }
+
                         if down && i < 3 && !MENU_OPEN.load(Ordering::Relaxed) {
                             // One mapping everywhere, cube and gantry alike:
                             // muscle memory doesn't change screens.
@@ -966,7 +988,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
         screen.flush().await;
         Timer::after(SPLASH).await;
 
-        const VIEWS: u8 = 5;
+        const VIEWS: u8 = 6;
         const FRAME_MS: u64 = 40;
         let mut ticker = Ticker::every(Duration::from_millis(FRAME_MS));
         let mut last = None;
@@ -1116,6 +1138,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     WHEEL_OPEN.load(Ordering::Relaxed),
                     WHEEL_SEL.load(Ordering::Relaxed),
                     gantry::recent_gain(),
+                    media::generation(),
                 ),
             );
             // A coasting cube changes with nothing else changing, so it gets a
@@ -1159,8 +1182,19 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         state.millivolts,
                         state.vpp_on,
                     ),
-                    (false, 3) => ui::test_pattern(&mut screen),
-                    (false, 4) => ui::all_on(&mut screen),
+                    (false, VIEW_MUSIC) => media::with_state(|status, vol, title, artist, art| {
+                        ui::draw_nowplaying(
+                            &mut screen,
+                            status,
+                            vol,
+                            title,
+                            artist,
+                            art,
+                            media::online(),
+                        )
+                    }),
+                    (false, 4) => ui::test_pattern(&mut screen),
+                    (false, 5) => ui::all_on(&mut screen),
                     (false, _) => ui::draw(&mut screen, &state),
                 }
                 // Nothing to push while the panel has no rail.
@@ -1550,7 +1584,13 @@ fn machine_line(line: &str) {
             proto!("#b {magic:#04x}");
             request_reboot(magic)
         }
-        _ => gantry::handle_line(line),
+        _ => {
+            // Media lines first, then the gantry: neither answers for the
+            // other's commands, so order only decides who sees a line first.
+            if !media::handle_line(line) {
+                gantry::handle_line(line);
+            }
+        }
     }
 }
 
