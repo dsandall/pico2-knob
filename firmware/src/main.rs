@@ -54,10 +54,7 @@ use embassy_nrf::gpio::{Flex, Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::pwm::{DutyCycle, SimpleConfig, SimplePwm};
 use embassy_nrf::saadc::{self, ChannelConfig, Saadc, VddhDiv5Input};
 use embassy_nrf::spim::{self, Spim};
-#[cfg(not(feature = "ble"))]
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
-#[cfg(feature = "ble")]
-use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
 use embassy_nrf::usb::{self, Driver};
 use embassy_nrf::{bind_interrupts, peripherals};
 use embassy_sync::blocking_mutex::Mutex;
@@ -70,13 +67,17 @@ use heapless::{String, Vec};
 
 use crate::display::Display;
 
-// In the `ble` build, CLOCK_POWER belongs to MPSL (see `ble::Irqs`), so USB
-// gives up hardware VBUS detection and is told it is plugged in - which it is,
-// or the console wouldn't be there to read.
+// CLOCK_POWER is one interrupt for two peripherals: USB's VBUS detection lives
+// on the POWER half, MPSL's clock management on the CLOCK half. The `ble`
+// build hands it to both. It has to: the bootloader leaves the USB events
+// enabled and latched, and an interrupt nobody clears is a storm that starves
+// everything below it the moment MPSL enables the line. See `ble::ClockGate`.
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
     #[cfg(not(feature = "ble"))]
     CLOCK_POWER => usb::vbus_detect::InterruptHandler;
+    #[cfg(feature = "ble")]
+    CLOCK_POWER => usb::vbus_detect::InterruptHandler, ble::ClockGate;
     SPIM3 => spim::InterruptHandler<peripherals::SPI3>;
     SAADC => saadc::InterruptHandler;
 });
@@ -174,9 +175,8 @@ static VPP_ON: AtomicBool = AtomicBool::new(false);
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 /// 0 = dark, 1 = dim heartbeat, 2 = full on (for finding the board).
 static LED_MODE: AtomicU8 = AtomicU8::new(1);
-/// The raw advertiser is harmless, so it self-starts. The BLE stack waits for
-/// 'w' - see the note in `ble::run`.
-static RADIO_ON: AtomicBool = AtomicBool::new(!cfg!(feature = "ble"));
+/// Both radios self-start; the menu's `ble` row (or 'w') turns them off.
+static RADIO_ON: AtomicBool = AtomicBool::new(true);
 static SEQ: AtomicU8 = AtomicU8::new(0);
 /// BAT+ / VDDH in millivolts, refreshed by the render loop.
 static BATT_MV: AtomicU16 = AtomicU16::new(0);
@@ -433,13 +433,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
     ];
 
     // ---- USB CDC-ACM ----
-    #[cfg(not(feature = "ble"))]
     let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
-    #[cfg(feature = "ble")]
-    let driver = {
-        static VBUS: static_cell::StaticCell<SoftwareVbusDetect> = static_cell::StaticCell::new();
-        Driver::new(p.USBD, Irqs, VBUS.init(SoftwareVbusDetect::new(true, true)) as &_)
-    };
     let mut usb_config = Config::new(0x1209, 0x0001); // pid.codes prototype VID/PID
     usb_config.manufacturer = Some("softek");
     usb_config.product = Some("pico2joy bring-up");
@@ -924,6 +918,18 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     counts[0],
                     counts[1],
                     counts[2]
+                );
+                // The machine as the bridge last described it, or "offline".
+                logln!(
+                    "gantry {} | X{} Y{} Z{} | homed {}{}{} | step {} mm",
+                    gantry::state_label(),
+                    ui::Millimetres(gantry::position(0)),
+                    ui::Millimetres(gantry::position(1)),
+                    ui::Millimetres(gantry::position(2)),
+                    if gantry::homed(0) { 'x' } else { '-' },
+                    if gantry::homed(1) { 'y' } else { '-' },
+                    if gantry::homed(2) { 'z' } else { '-' },
+                    ui::Millimetres(gantry::step_um())
                 );
             }
 

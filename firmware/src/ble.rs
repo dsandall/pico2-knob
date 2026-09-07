@@ -17,6 +17,9 @@
 
 use embassy_futures::join::join3;
 use embassy_futures::select::{Either3, select3};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use embassy_nrf::interrupt::typelevel::{Binding, CLOCK_POWER, Handler};
 use embassy_nrf::mode::Async;
 use embassy_nrf::rng::{self, Rng};
 use embassy_nrf::{Peri, bind_interrupts, peripherals};
@@ -30,12 +33,33 @@ use crate::state::{ENCODED_LEN, Payload, device_address};
 
 bind_interrupts!(struct Irqs {
     EGU0_SWI0 => mpsl::LowPrioInterruptHandler;
-    CLOCK_POWER => mpsl::ClockInterruptHandler;
     RADIO => mpsl::HighPrioInterruptHandler;
     TIMER0 => mpsl::HighPrioInterruptHandler;
     RTC0 => mpsl::HighPrioInterruptHandler;
     RNG => rng::InterruptHandler<peripherals::RNG>;
 });
+
+/// MPSL's share of CLOCK_POWER, which USB's VBUS detection also needs (it is
+/// one interrupt line for both peripherals). `main` binds the line to USB's
+/// handler and to this, in that order, so the POWER events are cleared before
+/// MPSL is asked about the CLOCK ones. Gated, because the line is live from the
+/// moment USB comes up and MPSL's handler has nothing to be called on until
+/// `mpsl_init` has run.
+pub struct ClockGate;
+
+static MPSL_UP: AtomicBool = AtomicBool::new(false);
+
+impl Handler<CLOCK_POWER> for ClockGate {
+    unsafe fn on_interrupt() {
+        if MPSL_UP.load(Ordering::Relaxed) {
+            unsafe { <mpsl::ClockInterruptHandler as Handler<CLOCK_POWER>>::on_interrupt() }
+        }
+    }
+}
+
+// SAFETY: `ClockGate` is what `main` binds to CLOCK_POWER, and it forwards to
+// MPSL's handler once the gate opens - which `try_run` does before `mpsl_init`.
+unsafe impl Binding<CLOCK_POWER, mpsl::ClockInterruptHandler> for Irqs {}
 
 pub const LOCAL_NAME: &str = "pico2joy";
 
@@ -144,9 +168,10 @@ async fn step(what: &str) {
 }
 
 pub async fn run<F: FnMut() -> Payload>(p: Claimed, snapshot: F) -> ! {
-    // Nothing happens until asked ('w' on the console). A board that wedges
-    // bringing the radio up still boots with its console and screen intact,
-    // which is the difference between a bad build and a dark board.
+    // Let the console come up first, so a stack that wedges bringing the radio
+    // up still leaves a board you can talk to; and the menu's `ble` row (or
+    // 'w') can hold it off altogether.
+    Timer::after_millis(1500).await;
     while !crate::RADIO_ON.load(core::sync::atomic::Ordering::Relaxed) {
         Timer::after_millis(100).await;
     }
@@ -168,11 +193,9 @@ async fn try_run<F: FnMut() -> Payload>(p: Claimed, mut snapshot: F) -> Result<(
         rc_temp_ctiv: mpsl::raw::MPSL_RECOMMENDED_RC_TEMP_CTIV as u8,
         // What the recommended calibration cadence above buys you.
         accuracy_ppm: 500,
-        // Don't block inside `mpsl_init` waiting for the LFCLK to report
-        // started: that wait is serviced by the CLOCK_POWER interrupt, whose
-        // priority MPSL only sets *after* init returns, and on this build it
-        // never came back. The clock starts either way; the stack just doesn't
-        // sit on the CPU waiting for it.
+        // Don't busy-wait inside `mpsl_init` for the LFCLK to report started:
+        // embassy started it long before we got here, and a spin inside init
+        // is exactly what turns a stuck interrupt into a dark board.
         skip_wait_lfclk_started: true,
     };
 
@@ -181,25 +204,42 @@ async fn try_run<F: FnMut() -> Payload>(p: Claimed, mut snapshot: F) -> Result<(
     let mpsl_p = MpslPeripherals::new(p.rtc0, p.timer0, p.temp, p.ppi_ch19, p.ppi_ch30, p.ppi_ch31);
     static MPSL: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
 
-    // What the clocks are doing on the way in. embassy starts the LFCLK for its
-    // RTC1 time driver during `init`, so by the time we get here it is already
-    // running on RC - measured on the bench: stat 0x00010000, src 0. That is
-    // worth printing every time, because `mpsl_init` below does not return on
-    // this board and the clock state is the first thing the next attempt at it
-    // will want to know. Stopping the LFCLK first was tried, and did not help.
+    // What the clocks and the shared interrupt are doing on the way in. embassy
+    // starts the LFCLK for its RTC1 time driver during `init`, so it is already
+    // running on RC here (stat 0x00010000, src 0), and the POWER half of
+    // CLOCK_POWER has USB's events armed. Worth a line every time: when
+    // `mpsl_init` didn't come back on this board, this is what found it.
     {
         let clock = embassy_nrf::pac::CLOCK;
+        let power = embassy_nrf::pac::POWER;
         crate::logln!(
             "ble: lfclk stat={:#010x} src={:#x}, hfclk stat={:#010x}",
             clock.lfclkstat().read().0,
             clock.lfclksrc().read().0,
             clock.hfclkstat().read().0,
         );
+        // The POWER half of the shared interrupt: what is enabled, and what is
+        // already latched. The bootloader's USB stack leaves USBDETECTED and
+        // USBPWRRDY armed, which is exactly what used to storm here.
+        crate::logln!(
+            "ble: power inten={:#010x} usbdetected={} usbpwrrdy={} usbremoved={}",
+            power.intenset().read().0,
+            power.events_usbdetected().read(),
+            power.events_usbpwrrdy().read(),
+            power.events_usbremoved().read(),
+        );
         Timer::after_millis(80).await;
     }
 
+    MPSL_UP.store(true, Ordering::Relaxed);
     let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, lfclk)?);
     step("mpsl up").await;
+
+    // USB runs off the crystal, and MPSL now decides when the crystal runs: a
+    // standing request keeps it on between radio events, where the controller
+    // would otherwise let it stop.
+    let _hfclk = mpsl.request_hfclk().await?;
+    step("hfclk held for usb").await;
 
     step("controller init").await;
     let sdc_p = SdcPeripherals::new(
