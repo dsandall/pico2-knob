@@ -35,6 +35,7 @@
 
 #[cfg(feature = "ble")]
 mod ble;
+mod accel;
 mod cube;
 mod display;
 mod gantry;
@@ -84,6 +85,15 @@ bind_interrupts!(struct Irqs {
 const TICK: Duration = Duration::from_millis(1);
 /// Consecutive stable samples (ms) needed to accept a switch edge.
 const DEBOUNCE_TICKS: u8 = 4;
+/// Two presses of the same button inside this many 1 kHz ticks are a double tap.
+const DOUBLE_TAP_TICKS: u32 = 400;
+/// Hold a button this long and the step wheel opens under your thumb.
+const HOLD_TICKS: u32 = 1000;
+/// Weight of the newest detent in the smoothed knob rate. Low enough that a
+/// couple of fast clicks don't read as a sustained spin.
+const RATE_SMOOTHING: f32 = 0.35;
+/// A gap longer than this ends the gesture, and the rate starts from nothing.
+const NEW_GESTURE_TICKS: u32 = 400;
 /// Heartbeat: a dim 120 ms wink every 5 s. The blue LED is on P0.15 via PWM so
 /// "dim" is real dimming, not a shorter blink. (The *red* LED is the LN2054
 /// charger's status output - hardware, no GPIO, nothing firmware can do.)
@@ -151,6 +161,14 @@ const VIEW_CUBE: u8 = 1;
 const VIEW_GANTRY: u8 = 2;
 /// Gantry zoom, in detents off the resting size - see [`cube::zoom_scale`].
 static ZOOM: AtomicI32 = AtomicI32::new(0);
+/// Whether the gantry screen spells its positions out. The frame shows you
+/// where the head is; the numbers say exactly, and get in the way of the view,
+/// so they are a double tap away rather than always on.
+static GANTRY_NUMBERS: AtomicBool = AtomicBool::new(false);
+/// The step wheel, and what it is currently pointing at. Open only while a
+/// button is held, so it can't be left on by accident.
+static WHEEL_OPEN: AtomicBool = AtomicBool::new(false);
+static WHEEL_SEL: AtomicU8 = AtomicU8::new(0);
 
 /// The device's control model: three jog counters, one selected axis. The knob
 /// drives the selected counter, BTN1/2/3 choose which. Everything on screen is
@@ -570,9 +588,16 @@ async fn main(_spawner: embassy_executor::Spawner) {
         let mut prev_ab = ab(&enc_a, &enc_b);
         let mut quarters: i8 = 0;
         let mut detents: i32 = 0;
+        // Tick of the last detent, and the smoothed rate the curve reads.
+        let mut last_detent: u32 = 0;
+        let mut rate: f32 = 0.0;
 
         let mut pressed = [false; 4];
         let mut stable = [0u8; 4];
+        // Tick of each button's last press, for spotting a double tap.
+        let mut last_press = [0u32; 4];
+        // How long each axis button has been held, in ticks.
+        let mut held = [0u32; 3];
         let mut was_verbose = false;
         let mut last_duty = u16::MAX;
 
@@ -610,67 +635,131 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         } else {
                             detents += direction;
                             DETENTS.store(detents, Ordering::Relaxed);
-                            let view = VIEW.load(Ordering::Relaxed);
-                            // On the cube screen the buttons are momentary: the
-                            // knob only spins an axis while it is held down, and
-                            // with nothing held it zooms. Everywhere else
-                            // BTN1/2/3 stay a latched select.
-                            let held = held_axis(&pressed);
-                            let axis = match (view, held) {
-                                (VIEW_CUBE, None) => None,
-                                (VIEW_CUBE, some) => some,
-                                _ => Some(AXIS.load(Ordering::Relaxed) as usize % 3),
+
+                            // How fast the knob is going, for [`accel`]. Ticks
+                            // are milliseconds.
+                            //
+                            // Averaged over the last few detents, not taken from
+                            // the gap that just closed: one quick pair of clicks
+                            // is not a fast turn, and treating it as one is what
+                            // makes acceleration feel like it is fighting you.
+                            // A long gap means a new gesture, so the average
+                            // starts again rather than carrying speed over from
+                            // whatever happened a second ago.
+                            let gap = ticks.wrapping_sub(last_detent).max(1);
+                            last_detent = ticks;
+                            let instant = 1000.0 / gap as f32;
+                            rate = if gap > NEW_GESTURE_TICKS {
+                                0.0
+                            } else {
+                                rate * (1.0 - RATE_SMOOTHING) + instant * RATE_SMOOTHING
                             };
-                            match axis {
-                                // The real machine: the knob asks the printer to
-                                // move, and the screen only changes once it says
-                                // it did.
-                                Some(axis) if view == VIEW_GANTRY => {
-                                    if gantry::can_jog(axis) {
-                                        let delta = gantry::jog(axis, direction);
+
+                            let view = VIEW.load(Ordering::Relaxed);
+                            // While the wheel is up the knob belongs to it.
+                            // Not a `continue`: this loop's tail is where the
+                            // ticker is awaited, and skipping that turns a 1 kHz
+                            // poll into a busy spin that starves everything else.
+                            if WHEEL_OPEN.load(Ordering::Relaxed) {
+                                let count = gantry::STEPS_UM.len() as i32;
+                                let sel = WHEEL_SEL.load(Ordering::Relaxed) as i32;
+                                let next = (sel + direction).rem_euclid(count);
+                                WHEEL_SEL.store(next as u8, Ordering::Relaxed);
+                            } else {
+                                // On the cube screen the buttons are momentary: the
+                                // knob only spins an axis while it is held down, and
+                                // with nothing held it zooms. Everywhere else
+                                // BTN1/2/3 stay a latched select.
+                                let held = held_axis(&pressed);
+                                let axis = match (view, held) {
+                                    (VIEW_CUBE, None) => None,
+                                    (VIEW_CUBE, some) => some,
+                                    _ => Some(AXIS.load(Ordering::Relaxed) as usize % 3),
+                                };
+                                match axis {
+                                    // The real machine: the knob asks the printer to
+                                    // move, and the screen only changes once it says
+                                    // it did.
+                                    Some(axis) if view == VIEW_GANTRY => {
+                                        if gantry::can_jog(axis) {
+                                            // One detent is worth more when the
+                                            // knob is moving - see [`accel`].
+                                            let steps = accel::steps_for(rate);
+                                            gantry::note_gain(steps);
+                                            let delta = gantry::jog(axis, direction * steps);
+                                            logln!(
+                                                "jog {} {} mm",
+                                                ui::AXIS_NAMES[axis],
+                                                ui::Millimetres(delta)
+                                            );
+                                        } else {
+                                            logln!(
+                                                "jog {} refused: {}",
+                                                ui::AXIS_NAMES[axis],
+                                                if !gantry::online() {
+                                                    "no bridge"
+                                                } else if !gantry::homed(axis) {
+                                                    "not homed"
+                                                } else {
+                                                    "printing"
+                                                }
+                                            );
+                                        }
+                                    }
+                                    Some(axis) => {
+                                        // The knob's real job: jog the chosen axis.
+                                        let jogged = AXIS_COUNTS[axis]
+                                            .fetch_add(direction, Ordering::Relaxed)
+                                            + direction;
                                         logln!(
-                                            "jog {} {} mm",
-                                            ui::AXIS_NAMES[axis],
-                                            ui::Millimetres(delta)
-                                        );
-                                    } else {
-                                        logln!(
-                                            "jog {} refused: {}",
-                                            ui::AXIS_NAMES[axis],
-                                            if !gantry::online() {
-                                                "no bridge"
-                                            } else if !gantry::homed(axis) {
-                                                "not homed"
-                                            } else {
-                                                "printing"
-                                            }
+                                            "ENC {} {}={jogged} detents={detents}",
+                                            if direction > 0 { "cw " } else { "ccw" },
+                                            ui::AXIS_NAMES[axis]
                                         );
                                     }
-                                }
-                                Some(axis) => {
-                                    // The knob's real job: jog the chosen axis.
-                                    let jogged = AXIS_COUNTS[axis]
-                                        .fetch_add(direction, Ordering::Relaxed)
-                                        + direction;
-                                    logln!(
-                                        "ENC {} {}={jogged} detents={detents}",
-                                        if direction > 0 { "cw " } else { "ccw" },
-                                        ui::AXIS_NAMES[axis]
-                                    );
-                                }
-                                None => {
-                                    let zoom = (ZOOM.load(Ordering::Relaxed) + direction)
-                                        .clamp(cube::ZOOM_MIN, cube::ZOOM_MAX);
-                                    ZOOM.store(zoom, Ordering::Relaxed);
-                                    logln!(
-                                        "ENC {} zoom={zoom} detents={detents}",
-                                        if direction > 0 { "cw " } else { "ccw" }
-                                    );
-                                }
+                                    None => {
+                                        let zoom = (ZOOM.load(Ordering::Relaxed) + direction)
+                                            .clamp(cube::ZOOM_MIN, cube::ZOOM_MAX);
+                                        ZOOM.store(zoom, Ordering::Relaxed);
+                                        logln!(
+                                            "ENC {} zoom={zoom} detents={detents}",
+                                            if direction > 0 { "cw " } else { "ccw" }
+                                        );
+                                    }
+                            }
                             }
                         }
                     }
                 }
+            }
+
+            // Held-button gestures. Edges are handled below; this is the part
+            // that needs to notice time passing rather than a change.
+            for i in 0..3 {
+                if pressed[i] {
+                    held[i] = held[i].saturating_add(1);
+                    // One second on any axis button opens the step wheel. Any
+                    // button, because whichever one is under your thumb is the
+                    // one you will hold.
+                    if held[i] == HOLD_TICKS
+                        && VIEW.load(Ordering::Relaxed) == VIEW_GANTRY
+                        && !MENU_OPEN.load(Ordering::Relaxed)
+                        && !WHEEL_OPEN.load(Ordering::Relaxed)
+                    {
+                        WHEEL_SEL.store(gantry::step_index() as u8, Ordering::Relaxed);
+                        WHEEL_OPEN.store(true, Ordering::Relaxed);
+                        logln!("wheel: open");
+                    }
+                } else {
+                    held[i] = 0;
+                }
+            }
+            // The wheel lives only as long as the hold: let go and whatever it
+            // is pointing at is the new step.
+            if WHEEL_OPEN.load(Ordering::Relaxed) && !pressed[..3].iter().any(|&d| d) {
+                WHEEL_OPEN.store(false, Ordering::Relaxed);
+                let step = gantry::set_step(WHEEL_SEL.load(Ordering::Relaxed) as usize);
+                logln!("wheel: step {} mm", ui::Millimetres(step));
             }
 
             // Switches, with a few ms of "must stay put" debounce.
@@ -697,16 +786,20 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         // BTN1/2/3 pick the axis the knob jogs, unless the menu
                         // has the buttons.
                         if down && i < 3 && !MENU_OPEN.load(Ordering::Relaxed) {
-                            // On the gantry screen the buttons are the axes they
-                            // are labelled with; elsewhere they follow the cube's
-                            // preferred order.
-                            let axis = if VIEW.load(Ordering::Relaxed) == VIEW_GANTRY {
-                                i
-                            } else {
-                                BUTTON_AXIS[i]
-                            };
+                            // One mapping everywhere, cube and gantry alike:
+                            // muscle memory doesn't change screens.
+                            let axis = BUTTON_AXIS[i];
                             AXIS.store(axis as u8, Ordering::Relaxed);
                             logln!("axis: {}", ui::AXIS_NAMES[axis]);
+
+                            // Double-tap any of them to show or hide the numbers.
+                            if VIEW.load(Ordering::Relaxed) == VIEW_GANTRY
+                                && ticks.wrapping_sub(last_press[i]) < DOUBLE_TAP_TICKS
+                            {
+                                let on = !GANTRY_NUMBERS.fetch_xor(true, Ordering::Relaxed);
+                                logln!("gantry: numbers {}", if on { "on" } else { "off" });
+                            }
+                            last_press[i] = ticks;
                         }
 
                         // The knob press is the menu key, and it means the
@@ -945,6 +1038,10 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     gantry::state_label(),
                     gantry::step_um(),
                     gantry::homed(0) as u8 | (gantry::homed(1) as u8) << 1 | (gantry::homed(2) as u8) << 2,
+                    GANTRY_NUMBERS.load(Ordering::Relaxed),
+                    WHEEL_OPEN.load(Ordering::Relaxed),
+                    WHEEL_SEL.load(Ordering::Relaxed),
+                    gantry::recent_gain(),
                 ),
             );
             // A coasting cube changes with nothing else changing, so it gets a
@@ -962,6 +1059,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
                             led: led_label(),
                             view: view_label(),
                             step_um: gantry::step_um(),
+                            accel: accel::profile_label(),
                             millivolts: state.millivolts,
                         },
                     ),
@@ -974,9 +1072,19 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         state.millivolts,
                         state.vpp_on,
                     ),
-                    (false, VIEW_GANTRY) => {
-                        ui::draw_gantry(&mut screen, axis, state.millivolts, state.vpp_on)
-                    }
+                    (false, VIEW_GANTRY) if WHEEL_OPEN.load(Ordering::Relaxed) => ui::draw_wheel(
+                        &mut screen,
+                        WHEEL_SEL.load(Ordering::Relaxed) as usize,
+                        state.millivolts,
+                        state.vpp_on,
+                    ),
+                    (false, VIEW_GANTRY) => ui::draw_gantry(
+                        &mut screen,
+                        axis,
+                        GANTRY_NUMBERS.load(Ordering::Relaxed),
+                        state.millivolts,
+                        state.vpp_on,
+                    ),
                     (false, 3) => ui::test_pattern(&mut screen),
                     (false, 4) => ui::all_on(&mut screen),
                     (false, _) => ui::draw(&mut screen, &state),
@@ -1115,6 +1223,10 @@ fn activate_menu_item() {
         ui::MenuItem::Step => {
             let um = gantry::next_step();
             logln!("menu: jog step {} mm", ui::Millimetres(um));
+        }
+        ui::MenuItem::Accel => {
+            let profile = accel::next_profile();
+            logln!("menu: jog accel {profile}");
         }
         ui::MenuItem::Home => {
             gantry::request("home");

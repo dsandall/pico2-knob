@@ -54,6 +54,28 @@ static SEEN_MS: AtomicU32 = AtomicU32::new(0);
 /// instead of a queue of them.
 static PENDING_UM: [AtomicI32; AXES] = [AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0)];
 
+/// The gain the last detent got, and when - so the screen can say "x6" while
+/// it is happening and go quiet afterwards, rather than showing a multiplier
+/// that hasn't applied to anything for a minute.
+static GAIN: AtomicU8 = AtomicU8::new(1);
+static GAIN_MS: AtomicU32 = AtomicU32::new(0);
+/// How long a gain stays on screen after the detent that earned it.
+const GAIN_SHOWN_MS: u32 = 500;
+
+pub fn note_gain(steps: i32) {
+    GAIN.store(steps.clamp(1, 255) as u8, Ordering::Relaxed);
+    let now = Instant::now().as_millis() as u32;
+    GAIN_MS.store(if now == 0 { 1 } else { now }, Ordering::Relaxed);
+}
+
+/// The multiplier worth showing right now, if any.
+pub fn recent_gain() -> Option<u8> {
+    let gain = GAIN.load(Ordering::Relaxed);
+    let at = GAIN_MS.load(Ordering::Relaxed);
+    let fresh = at != 0 && (Instant::now().as_millis() as u32).wrapping_sub(at) < GAIN_SHOWN_MS;
+    if gain > 1 && fresh { Some(gain) } else { None }
+}
+
 /// How long a `#s` stays good. Two and a half bridge ticks, so one dropped
 /// update doesn't blink the screen to "offline".
 const STALE_MS: u32 = 1200;
@@ -68,6 +90,13 @@ pub fn step_index() -> usize {
 
 pub fn step_um() -> i32 {
     STEPS_UM[step_index()]
+}
+
+/// Pick a step size outright, which is what the wheel does.
+pub fn set_step(index: usize) -> i32 {
+    let index = index % STEPS_UM.len();
+    STEP.store(index as u8, Ordering::Relaxed);
+    STEPS_UM[index]
 }
 
 pub fn next_step() -> i32 {

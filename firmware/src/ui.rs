@@ -41,13 +41,14 @@ pub enum MenuItem {
     Led,
     Screen,
     Step,
+    Accel,
     Home,
     Battery,
     Exit,
 }
 
 impl MenuItem {
-    pub const COUNT: u8 = 8;
+    pub const COUNT: u8 = 9;
 
     pub fn from_index(index: u8) -> Self {
         match index % Self::COUNT {
@@ -56,8 +57,9 @@ impl MenuItem {
             2 => Self::Led,
             3 => Self::Screen,
             4 => Self::Step,
-            5 => Self::Home,
-            6 => Self::Battery,
+            5 => Self::Accel,
+            6 => Self::Home,
+            7 => Self::Battery,
             _ => Self::Exit,
         }
     }
@@ -69,6 +71,7 @@ impl MenuItem {
             Self::Led => "led",
             Self::Screen => "screen",
             Self::Step => "jog step",
+            Self::Accel => "jog accel",
             Self::Home => "home all",
             Self::Battery => "battery",
             Self::Exit => "exit",
@@ -83,6 +86,7 @@ pub struct MenuState {
     pub led: &'static str,
     pub view: &'static str,
     pub step_um: i32,
+    pub accel: &'static str,
     pub millivolts: u16,
 }
 
@@ -172,6 +176,9 @@ pub fn draw_menu(d: &mut Display<'_>, menu: &MenuState) {
             }
             MenuItem::Step => {
                 let _ = write!(value, "{}", Millimetres(menu.step_um));
+            }
+            MenuItem::Accel => {
+                let _ = write!(value, "{}", menu.accel);
             }
             // Both are actions, not readings: the row is the whole story.
             MenuItem::Home => {}
@@ -295,12 +302,13 @@ impl core::fmt::Display for Millimetres {
     }
 }
 
-/// The gantry screen: where the printer says its toolhead is, inside the travel
-/// it has, and which axis the knob will jog. Everything here is the host's
-/// truth - see [`crate::gantry`] - so an unhomed axis shows dashes rather than a
-/// number, and a bridge that stops talking says "offline" instead of freezing a
-/// stale pose on screen.
-pub fn draw_gantry(d: &mut Display<'_>, selected: usize, millivolts: u16, vpp_on: bool) {
+/// The step wheel: hold any axis button and the step sizes fan out around the
+/// knob, turn to pick one, let go to take it.
+///
+/// A wheel rather than a list because the input is a wheel - the thing in your
+/// hand goes round, so the choices go round, and "two clicks anticlockwise" is
+/// a gesture you can make without reading the screen twice.
+pub fn draw_wheel(d: &mut Display<'_>, selected: usize, millivolts: u16, vpp_on: bool) {
     d.clear();
     header(d, millivolts, vpp_on);
 
@@ -308,10 +316,133 @@ pub fn draw_gantry(d: &mut Display<'_>, selected: usize, millivolts: u16, vpp_on
     let fill = PrimitiveStyle::with_fill(BinaryColor::On);
     let small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
     let small_inv = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
+    let centred = TextStyleBuilder::new()
+        .baseline(Baseline::Middle)
+        .alignment(Alignment::Center)
+        .build();
+
+    // Four seats around the knob, clockwise from the top. Hard-coded rather
+    // than trigonometry: four points do not need `sinf`.
+    const SEATS: [(i32, i32); 4] = [(64, 44), (98, 72), (64, 100), (30, 72)];
+    let steps = crate::gantry::STEPS_UM;
+
+    let _ = Text::with_text_style("jog step", Point::new(64, 72), small, centred).draw(d);
+
+    for (index, seat) in SEATS.iter().enumerate().take(steps.len()) {
+        let (x, y) = *seat;
+        let active = index == selected % steps.len();
+
+        let mut label: String<12> = String::new();
+        let _ = write!(label, "{}", Millimetres(steps[index]));
+        // 6 px a character, plus a little air either side.
+        let width = 6 * label.len() as u32 + 8;
+        let box_ = Rectangle::new(
+            Point::new(x - width as i32 / 2, y - 7),
+            Size::new(width, 14),
+        );
+        let _ = box_.into_styled(if active { fill } else { on }).draw(d);
+        let _ = Text::with_text_style(
+            &label,
+            Point::new(x, y),
+            if active { small_inv } else { small },
+            centred,
+        )
+        .draw(d);
+    }
+
+    let _ = Text::with_text_style("let go to keep it", Point::new(64, 118), small, centred)
+        .draw(d);
+    let _ = Rectangle::new(Point::new(0, 108), Size::new(128, 1))
+        .into_styled(on)
+        .draw(d);
+}
+
+/// Isometric projection of the build volume. Takes a point as a fraction of
+/// each axis's travel and gives back pixels: x goes right-and-down, y
+/// left-and-down, z straight up. Not a calibrated view of anything - it is a
+/// picture of where the head is in the frame, and that only has to be right
+/// enough to read at a glance.
+fn iso(unit: [f32; 3]) -> Point {
+    const CENTRE: (i32, i32) = (64, 58);
+    const SCALE: f32 = 32.0;
+    /// cos(30 degrees): the ordinary isometric, near enough.
+    const COS30: f32 = 0.866;
+
+    let (x, y, z) = (unit[0] - 0.5, unit[1] - 0.5, unit[2] - 0.5);
+    let across = (x - y) * COS30;
+    let down = (x + y) * 0.5 - z;
+    Point::new(
+        CENTRE.0 + (across * SCALE) as i32,
+        CENTRE.1 + (down * SCALE) as i32,
+    )
+}
+
+/// The eight corners of the volume, indexed so bit 0 is x, bit 1 is y, bit 2 z.
+fn volume_corner(index: usize) -> [f32; 3] {
+    [
+        (index & 1) as f32,
+        ((index >> 1) & 1) as f32,
+        ((index >> 2) & 1) as f32,
+    ]
+}
+
+/// Bottom square, top square, then the four uprights.
+const VOLUME_EDGES: [(usize, usize); 12] = [
+    (0, 1), (0, 2), (1, 3), (2, 3),
+    (4, 5), (4, 6), (5, 7), (6, 7),
+    (0, 4), (1, 5), (2, 6), (3, 7),
+];
+
+/// Where the head sits in its travel, per axis, as 0..1.
+fn head_unit() -> [f32; 3] {
+    let mut unit = [0.0f32; 3];
+    for axis in 0..crate::gantry::AXES {
+        let (min, max) = crate::gantry::limits(axis);
+        let span = (max - min) as f32;
+        if span > 0.0 {
+            let along = (crate::gantry::position(axis) - min) as f32 / span;
+            unit[axis] = if along < 0.0 {
+                0.0
+            } else if along > 1.0 {
+                1.0
+            } else {
+                along
+            };
+        }
+    }
+    unit
+}
+
+/// The gantry screen: the build volume in isometric with the printhead where
+/// the printer says it is, and the exact numbers a double-tap away.
+///
+/// Everything here is the host's truth - see [`crate::gantry`] - so an unhomed
+/// machine gets an empty frame rather than a head drawn where nobody knows it
+/// is, and a bridge that stops talking says so instead of leaving a stale pose
+/// on screen.
+pub fn draw_gantry(
+    d: &mut Display<'_>,
+    selected: usize,
+    show_numbers: bool,
+    millivolts: u16,
+    vpp_on: bool,
+) {
+    d.clear();
+    header(d, millivolts, vpp_on);
+
+    let on = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let fill = PrimitiveStyle::with_fill(BinaryColor::On);
+    let clear = PrimitiveStyle::with_fill(BinaryColor::Off);
+    let small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let small_inv = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
     let top_left = TextStyleBuilder::new().baseline(Baseline::Top).build();
     let top_right = TextStyleBuilder::new()
         .baseline(Baseline::Top)
         .alignment(Alignment::Right)
+        .build();
+    let centred = TextStyleBuilder::new()
+        .baseline(Baseline::Middle)
+        .alignment(Alignment::Center)
         .build();
 
     // Status row: what the printer is doing, and which axes know where they are.
@@ -324,9 +455,10 @@ pub fn draw_gantry(d: &mut Display<'_>, selected: usize, millivolts: u16, vpp_on
     .draw(d);
     for axis in 0..crate::gantry::AXES {
         let origin = Point::new(98 + 10 * axis as i32, 14);
-        let rect = Rectangle::new(origin, Size::new(9, 11));
         let homed = crate::gantry::homed(axis);
-        let _ = rect.into_styled(if homed { fill } else { on }).draw(d);
+        let _ = Rectangle::new(origin, Size::new(9, 11))
+            .into_styled(if homed { fill } else { on })
+            .draw(d);
         let _ = Text::with_text_style(
             AXIS_NAMES[axis],
             Point::new(origin.x + 2, origin.y + 1),
@@ -336,49 +468,106 @@ pub fn draw_gantry(d: &mut Display<'_>, selected: usize, millivolts: u16, vpp_on
         .draw(d);
     }
 
-    // One block per axis: name, position, and where that sits in its travel.
-    for axis in 0..crate::gantry::AXES {
-        let top = 30 + 26 * axis as i32;
-        let active = axis == selected;
+    // The frame itself.
+    for (from, to) in VOLUME_EDGES {
+        let _ = Line::new(iso(volume_corner(from)), iso(volume_corner(to)))
+            .into_styled(on)
+            .draw(d);
+    }
 
-        let name = Rectangle::new(Point::new(2, top), Size::new(11, 11));
-        let _ = name.into_styled(if active { fill } else { on }).draw(d);
+    let known =
+        crate::gantry::online() && (0..crate::gantry::AXES).all(crate::gantry::homed);
+    if known {
+        let unit = head_unit();
+        let head = iso(unit);
+        let below = iso([unit[0], unit[1], 0.0]);
+
+        // The two rails the head rides, drawn at its height: this is what makes
+        // a dot in a box read as a machine.
+        let _ = Line::new(iso([0.0, unit[1], unit[2]]), iso([1.0, unit[1], unit[2]]))
+            .into_styled(on)
+            .draw(d);
+        let _ = Line::new(iso([unit[0], 0.0, unit[2]]), iso([unit[0], 1.0, unit[2]]))
+            .into_styled(on)
+            .draw(d);
+
+        // Where it is over the bed, and how far above it.
+        let _ = Line::new(head, below).into_styled(on).draw(d);
+        let _ = Rectangle::new(Point::new(below.x - 1, below.y - 1), Size::new(3, 3))
+            .into_styled(on)
+            .draw(d);
+        let _ = Rectangle::new(Point::new(head.x - 2, head.y - 2), Size::new(5, 5))
+            .into_styled(fill)
+            .draw(d);
+    } else {
+        let missing = if crate::gantry::online() {
+            "not homed"
+        } else {
+            "no bridge"
+        };
+        let _ = Rectangle::new(Point::new(28, 52), Size::new(72, 13))
+            .into_styled(clear)
+            .draw(d);
+        let _ = Text::with_text_style(missing, Point::new(64, 58), small, centred).draw(d);
+    }
+
+    // The numbers, when asked for: cleared out of the drawing rather than laid
+    // over it, because one-bit text on top of wireframe is neither.
+    if show_numbers {
+        let _ = Rectangle::new(Point::new(0, 90), Size::new(128, 22))
+            .into_styled(clear)
+            .draw(d);
+        let mut first: String<24> = String::new();
+        let mut second: String<24> = String::new();
+        if known {
+            let _ = write!(
+                first,
+                "X{} Y{}",
+                Millimetres(crate::gantry::position(0)),
+                Millimetres(crate::gantry::position(1))
+            );
+            let _ = write!(second, "Z{}", Millimetres(crate::gantry::position(2)));
+        } else {
+            let _ = write!(first, "X --.-- Y --.--");
+            let _ = write!(second, "Z --.--");
+        }
+        let _ = Text::with_text_style(&first, Point::new(2, 91), small, top_left).draw(d);
+        let _ = Text::with_text_style(&second, Point::new(2, 101), small, top_left).draw(d);
+    }
+
+    // Which button drives which axis, with the selected one filled. The mapping
+    // is [`crate::BUTTON_AXIS`] - the same one the cube uses - and this row is
+    // where you read it off without going to the source.
+    for (slot, &axis) in crate::BUTTON_AXIS.iter().enumerate() {
+        let origin = Point::new(2 + 22 * slot as i32, 114);
+        let active = axis == selected;
+        let _ = Rectangle::new(origin, Size::new(20, 12))
+            .into_styled(if active { fill } else { on })
+            .draw(d);
+        let mut label: String<4> = String::new();
+        let _ = write!(label, "{}{}", slot + 1, AXIS_NAMES[axis]);
         let _ = Text::with_text_style(
-            AXIS_NAMES[axis],
-            Point::new(5, top + 1),
+            &label,
+            Point::new(origin.x + 4, origin.y + 1),
             if active { small_inv } else { small },
             top_left,
         )
         .draw(d);
-
-        let (min, max) = crate::gantry::limits(axis);
-        let position = crate::gantry::position(axis);
-        let mut value: String<16> = String::new();
-        if crate::gantry::homed(axis) {
-            let _ = write!(value, "{} mm", Millimetres(position));
-        } else {
-            let _ = write!(value, "--.-- mm");
-        }
-        let _ = Text::with_text_style(&value, Point::new(126, top + 1), small, top_right).draw(d);
-
-        // Travel bar. The outline is the axis's whole range; the block is where
-        // the head is in it.
-        let track = Rectangle::new(Point::new(2, top + 14), Size::new(124, 7));
-        let _ = track.into_styled(on).draw(d);
-        if crate::gantry::homed(axis) && max > min {
-            let span = (max - min) as i64;
-            let along = ((position.clamp(min, max) - min) as i64 * 120) / span;
-            let _ = Rectangle::new(Point::new(4 + along as i32 - 1, top + 16), Size::new(3, 3))
-                .into_styled(fill)
-                .draw(d);
-        }
     }
 
-    // What one detent is worth, and the reminder of which button picks what.
-    let mut step: String<20> = String::new();
-    let _ = write!(step, "step {} mm", Millimetres(crate::gantry::step_um()));
-    let _ = Text::with_text_style(&step, Point::new(2, 114), small, top_left).draw(d);
-    let _ = Text::with_text_style("1/2/3 axis", Point::new(126, 114), small, top_right).draw(d);
+    let mut step: String<16> = String::new();
+    match crate::gantry::recent_gain() {
+        // Mid-flick: say what the knob is actually doing, not what it does at
+        // rest. The multiplier vanishing again is the point - it means the
+        // acceleration stopped applying.
+        Some(gain) => {
+            let _ = write!(step, "{}mm x{gain}", Millimetres(crate::gantry::step_um()));
+        }
+        None => {
+            let _ = write!(step, "{}mm", Millimetres(crate::gantry::step_um()));
+        }
+    }
+    let _ = Text::with_text_style(&step, Point::new(126, 115), small, top_right).draw(d);
 }
 
 /// The gantry screen: a wireframe cube standing in for the machine, and the
