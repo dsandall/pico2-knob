@@ -361,6 +361,15 @@ class Gantry:
         self.homed = ""
         self.state = 0
         self.position = [0.0, 0.0, 0.0]
+        # Jogs waiting to go out, in micrometres per axis. The puck already
+        # coalesces a frame's worth of detents into one request; this coalesces
+        # the requests themselves, because each one costs an HTTP round trip and
+        # a G-code script that Moonraker holds open until the move finishes.
+        # Spin the knob fast without it and the relay spends its time waiting
+        # for 0.1 mm moves while the queue - and the lag - grows.
+        self.queued = [0, 0, 0]
+        self.queued_since = 0.0
+        self.queued_count = 0
 
     def poll(self):
         status = self.printer.status()
@@ -410,6 +419,7 @@ class Gantry:
             log("puck: unknown %s" % line)
 
     def jog(self, fields):
+        """Take a jog request. It goes out on the next flush, not now."""
         try:
             axis_index, delta_um = int(fields[0]), int(fields[1])
         except (IndexError, ValueError):
@@ -424,25 +434,56 @@ class Gantry:
         if axis not in self.homed:
             log("refused jog %s: not homed" % axis.upper())
             return
-        if self.limits:
-            low, high = self.limits[axis_index]
-            target = um(self.position[axis_index]) + delta_um
-            if target < low or target > high:
-                log("refused jog %s: %.2f outside %.2f..%.2f"
-                    % (axis.upper(), target / 1000.0, low / 1000.0, high / 1000.0))
-                return
-        delta = delta_um / 1000.0
+        if not self.queued_count:
+            self.queued_since = time.time()
+        self.queued[axis_index] += delta_um
+        self.queued_count += 1
+
+    def flush_jogs(self, now):
+        """Send everything queued as one move, once it has had time to gather.
+
+        Waiting a beat is the whole point: a knob spun quickly arrives as a
+        stream of small deltas, and one move of their sum reaches the same place
+        far sooner than fifty moves in a row. Axes travelling together go in one
+        G1, so a diagonal is a diagonal rather than a staircase.
+        """
+        if not self.queued_count or now - self.queued_since < self.args.jog_interval:
+            return
+
+        pending, count = self.queued, self.queued_count
+        self.queued, self.queued_count = [0, 0, 0], 0
+
+        moves = []
+        for axis_index, delta_um in enumerate(pending):
+            if delta_um == 0:
+                continue
+            axis = AXES[axis_index]
+            if self.limits:
+                low, high = self.limits[axis_index]
+                target = um(self.position[axis_index]) + delta_um
+                if target < low or target > high:
+                    log("refused jog %s: %.2f outside %.2f..%.2f"
+                        % (axis.upper(), target / 1000.0, low / 1000.0, high / 1000.0))
+                    continue
+            moves.append((axis, delta_um / 1000.0))
+        if not moves:
+            return
+
+        # The slowest axis in the move sets the feedrate; Z is the slow one, and
+        # a diagonal that includes it should travel at Z's pace.
+        feed = min(FEED[axis] for axis, _ in moves)
+        travel = " ".join("%s%.3f" % (axis.upper(), delta) for axis, delta in moves)
         script = ("SAVE_GCODE_STATE NAME=pico2joy_jog\n"
                   "G91\n"
-                  "G1 %s%.3f F%.0f\n"
-                  "RESTORE_GCODE_STATE NAME=pico2joy_jog" % (axis.upper(), delta, FEED[axis]))
+                  "G1 %s F%.0f\n"
+                  "RESTORE_GCODE_STATE NAME=pico2joy_jog" % (travel, feed))
         try:
             self.printer.gcode(script)
-            log("jog %s %+.3f mm" % (axis.upper(), delta))
+            log("jog %s%s" % (travel, "" if count == 1 else " (%d requests)" % count))
         except urllib.error.HTTPError as error:
-            log("jog %s rejected: %s" % (axis.upper(), error.read().decode()[:120]))
+            log("jog %s rejected: %s" % (travel, error.read().decode()[:120]))
         except OSError as error:
-            log("jog %s failed: %s" % (axis.upper(), error))
+            log("jog %s failed: %s" % (travel, error))
 
     def command(self, fields):
         if not fields:
@@ -516,6 +557,7 @@ class Gantry:
             except OSError as error:
                 log("puck read failed (%s); reopening" % error)
                 self.reopen()
+            self.flush_jogs(time.time())
 
 
 # --------------------------------------------------------------------------
@@ -809,6 +851,9 @@ def main():
     gantry.add_argument("--tunnel", metavar="USER@HOST",
                         help="forward Moonraker over ssh so requests come from localhost")
     gantry.add_argument("--rate", type=float, default=8.0, help="state updates per second")
+    gantry.add_argument("--jog-interval", type=float, default=0.12, metavar="SECONDS",
+                        help="how long to gather jogs before sending them as one move"
+                             " (default: %(default)s)")
     gantry.add_argument("--wait-for-puck", action="store_true",
                         help="sit and retry until the puck turns up (for running as a service)")
     gantry.set_defaults(run=cmd_gantry)
