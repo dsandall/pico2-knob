@@ -40,6 +40,7 @@ mod media;
 mod cube;
 mod display;
 mod gantry;
+mod quota;
 #[cfg(not(feature = "ble"))]
 mod radio;
 mod state;
@@ -119,12 +120,13 @@ const SPLASH: Duration = Duration::from_millis(1500);
 const SWITCH_NAMES: [&str; 4] = ["BTN1", "BTN2", "BTN3", "ENC_SW"];
 
 const HELP: &str = concat!(
-    "\r\ncommands: ? help | p pins | d cycle view (live/gantry/pattern/all-on)\r\n",
+    "\r\ncommands: ? help | p pins | d next view (or hold the knob and turn it)\r\n",
     "          i re-init display | f flip 180 | +/- contrast | e 12V rail\r\n",
     "          w wireless | m menu (knob moves, 1/2/3 select, knob press exits)\r\n",
     "          1/2/3 select axis (Z/X/Y, as the buttons do) | , . jog it\r\n",
     "          cube: hold 1/2/3 to spin that axis, knob alone zooms\r\n",
     "          gantry: 1/2/3 pick the axis, knob jogs it (needs the bridge)\r\n",
+    "          quota: hold a button to re-check the plans | r does it here\r\n",
     "          l led (dark/dim/on) | v verbose | b bootloader (UF2)\r\n",
     "          #r uf2|serial|ota  reboot into a bootloader mode\r\n"
 );
@@ -185,12 +187,22 @@ static BATT_MV: AtomicU16 = AtomicU16::new(0);
 static LINK_STATE: AtomicU8 = AtomicU8::new(0);
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 static MENU_SEL: AtomicU8 = AtomicU8::new(0);
-/// 0 = live inputs, 1 = the cube, 2 = the real gantry, 3 = now playing,
-/// 4 = orientation pattern, 5 = all pixels on.
+/// 0 = the cube, 1 = the real gantry, 2 = now playing, 3 = subscription quotas,
+/// 4 = the orientation pattern.
+///
+/// The live input view and the all-pixels-on screen used to bracket these. Both
+/// were bring-up instruments rather than things to look at: the pips told you a
+/// switch was wired, which `p` also reports and every other screen now proves by
+/// working, and lighting every pixel loaded VPP hard enough to find a weak boost
+/// - on a board whose rail can't be gated anyway. The orientation pattern stays,
+/// because a panel mounted the wrong way round is still worth one keystroke.
 static VIEW: AtomicU8 = AtomicU8::new(0);
-const VIEW_CUBE: u8 = 1;
-const VIEW_GANTRY: u8 = 2;
-const VIEW_MUSIC: u8 = 3;
+const VIEW_CUBE: u8 = 0;
+const VIEW_GANTRY: u8 = 1;
+const VIEW_MUSIC: u8 = 2;
+const VIEW_QUOTA: u8 = 3;
+const VIEW_PATTERN: u8 = 4;
+const VIEWS: u8 = 5;
 /// Gantry zoom, in detents off the resting size - see [`cube::zoom_scale`].
 static ZOOM: AtomicI32 = AtomicI32::new(0);
 /// Whether the gantry screen spells its positions out. The frame shows you
@@ -201,6 +213,7 @@ static GANTRY_NUMBERS: AtomicBool = AtomicBool::new(false);
 /// button is held, so it can't be left on by accident.
 static WHEEL_OPEN: AtomicBool = AtomicBool::new(false);
 static WHEEL_SEL: AtomicU8 = AtomicU8::new(0);
+
 
 /// The device's control model: three jog counters, one selected axis. The knob
 /// drives the selected counter, BTN1/2/3 choose which. Everything on screen is
@@ -243,7 +256,7 @@ static REQ_FLIP: AtomicBool = AtomicBool::new(false);
 static REQ_BRIGHTER: AtomicBool = AtomicBool::new(false);
 static REQ_DIMMER: AtomicBool = AtomicBool::new(false);
 
-fn link_label() -> &'static str {
+pub fn link_label() -> &'static str {
     match LINK_STATE.load(Ordering::Relaxed) {
         1 => "starting",
         2 => "adv",
@@ -260,14 +273,25 @@ fn led_label() -> &'static str {
     }
 }
 
-fn view_label() -> &'static str {
+/// The radio in three characters, for the title bar - `link_label`'s
+/// "connected" is eight, and the header has room for a word, not a sentence.
+pub fn link_short() -> &'static str {
+    match LINK_STATE.load(Ordering::Relaxed) {
+        1 => "...",
+        2 => "adv",
+        3 => "ble",
+        _ => "off",
+    }
+}
+
+pub fn view_label() -> &'static str {
     match VIEW.load(Ordering::Relaxed) {
         VIEW_CUBE => "cube",
         VIEW_GANTRY => "gantry",
         VIEW_MUSIC => "music",
-        4 => "pattern",
-        5 => "all-on",
-        _ => "live",
+        VIEW_QUOTA => "quota",
+        VIEW_PATTERN => "pattern",
+        _ => "cube",
     }
 }
 
@@ -663,6 +687,9 @@ async fn main(_spawner: embassy_executor::Spawner) {
         let mut last_press = [0u32; 4];
         // How long each axis button has been held, in ticks.
         let mut held = [0u32; 3];
+        // Whether the knob has been turned since it was pressed - which makes
+        // the press an app switch rather than a request for the menu.
+        let mut knob_turned = false;
         let mut was_verbose = false;
         let mut last_duty = u16::MAX;
 
@@ -690,7 +717,23 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     if quarters.abs() >= 4 {
                         let direction = quarters.signum() as i32;
                         quarters = 0;
-                        if MENU_OPEN.load(Ordering::Relaxed) {
+                        if pressed[3] {
+                            // Hold the knob and turn it: the app switcher. One
+                            // gesture reaches every screen from every screen,
+                            // which `d` on the console can only do forwards -
+                            // and it costs no button, because the knob press
+                            // was already the only thing the knob did.
+                            //
+                            // The press is settled on release, below: this is
+                            // what tells it the press was a modifier and not a
+                            // request for the menu.
+                            knob_turned = true;
+                            let view = (VIEW.load(Ordering::Relaxed) as i32 + direction)
+                                .rem_euclid(VIEWS as i32) as u8;
+                            VIEW.store(view, Ordering::Relaxed);
+                            logln!("view: {}", view_label());
+                            proto!("#view {}", view_label());
+                        } else if MENU_OPEN.load(Ordering::Relaxed) {
                             // In the menu the knob moves the selection instead of
                             // spinning the counter.
                             let count = ui::MenuItem::COUNT as i32;
@@ -811,14 +854,22 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     // One second on any axis button opens the step wheel. Any
                     // button, because whichever one is under your thumb is the
                     // one you will hold.
-                    if held[i] == HOLD_TICKS
-                        && VIEW.load(Ordering::Relaxed) == VIEW_GANTRY
-                        && !MENU_OPEN.load(Ordering::Relaxed)
-                        && !WHEEL_OPEN.load(Ordering::Relaxed)
-                    {
-                        WHEEL_SEL.store(gantry::step_index() as u8, Ordering::Relaxed);
-                        WHEEL_OPEN.store(true, Ordering::Relaxed);
-                        logln!("wheel: open");
+                    if held[i] == HOLD_TICKS && !MENU_OPEN.load(Ordering::Relaxed) {
+                        match VIEW.load(Ordering::Relaxed) {
+                            VIEW_GANTRY if !WHEEL_OPEN.load(Ordering::Relaxed) => {
+                                WHEEL_SEL.store(gantry::step_index() as u8, Ordering::Relaxed);
+                                WHEEL_OPEN.store(true, Ordering::Relaxed);
+                                logln!("wheel: open");
+                            }
+                            // The question the quota screen answers is "has it
+                            // reset yet?", and waiting out a poll interval is a
+                            // poor answer to it.
+                            VIEW_QUOTA => {
+                                quota::request_refresh();
+                                logln!("quota: refresh requested");
+                            }
+                            _ => {}
+                        }
                     }
                 } else {
                     held[i] = 0;
@@ -890,20 +941,20 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         // same thing both ways round: in opens it, in again
                         // leaves. Inside, the three buttons are the select -
                         // whichever one falls under your thumb.
-                        if down {
-                            let open = MENU_OPEN.load(Ordering::Relaxed);
-                            match (i, open) {
-                                (3, false) => {
-                                    MENU_OPEN.store(true, Ordering::Relaxed);
-                                    logln!("menu: open");
-                                }
-                                (3, true) => {
-                                    MENU_OPEN.store(false, Ordering::Relaxed);
-                                    logln!("menu: closed");
-                                }
-                                (_, true) => activate_menu_item(),
-                                _ => {}
+                        //
+                        // It is decided on the *release* rather than the press,
+                        // because a held knob is also the app switcher and we
+                        // can't know which of the two it was until it comes
+                        // back up. A turn in between claims it.
+                        if i == 3 {
+                            if down {
+                                knob_turned = false;
+                            } else if !knob_turned {
+                                let open = !MENU_OPEN.fetch_xor(true, Ordering::Relaxed);
+                                logln!("menu: {}", if open { "open" } else { "closed" });
                             }
+                        } else if down && MENU_OPEN.load(Ordering::Relaxed) {
+                            activate_menu_item();
                         }
                     }
                 }
@@ -988,7 +1039,6 @@ async fn main(_spawner: embassy_executor::Spawner) {
         screen.flush().await;
         Timer::after(SPLASH).await;
 
-        const VIEWS: u8 = 6;
         const FRAME_MS: u64 = 40;
         let mut ticker = Ticker::every(Duration::from_millis(FRAME_MS));
         let mut last = None;
@@ -1088,9 +1138,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         bits & 8 != 0,
                     ]
                 },
-                vpp_on: boost.on,
                 millivolts: BATT_MV.load(Ordering::Relaxed),
-                link: link_label(),
             };
 
             let menu_open = MENU_OPEN.load(Ordering::Relaxed);
@@ -1119,7 +1167,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
             let key = (
                 state.detents,
                 PRESSED.load(Ordering::Relaxed),
-                state.vpp_on,
+                boost.on,
                 view,
                 state.millivolts,
                 menu_open,
@@ -1142,6 +1190,15 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     WHEEL_SEL.load(Ordering::Relaxed),
                     gantry::recent_gain(),
                     media::generation(),
+                    // The quota screen counts down between updates, so it needs
+                    // a clock in the key as well as the bridge's changes - but
+                    // only while it is up, or every view would redraw on the
+                    // half minute for nothing. Nested because a tuple compares
+                    // twelve fields at most, and this one was full.
+                    (
+                        quota::generation(),
+                        if view == VIEW_QUOTA { quota::tick() } else { 0 },
+                    ),
                 ),
             );
             // A coasting cube changes with nothing else changing, so it gets a
@@ -1155,7 +1212,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         &ui::MenuState {
                             selected: MENU_SEL.load(Ordering::Relaxed),
                             link: link_label(),
-                            vpp_on: state.vpp_on,
+                            vpp_on: boost.on,
                             led: led_label(),
                             view: view_label(),
                             step_um: gantry::step_um(),
@@ -1170,20 +1227,17 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         held,
                         zoom,
                         state.millivolts,
-                        state.vpp_on,
                     ),
                     (false, VIEW_GANTRY) if WHEEL_OPEN.load(Ordering::Relaxed) => ui::draw_wheel(
                         &mut screen,
                         WHEEL_SEL.load(Ordering::Relaxed) as usize,
                         state.millivolts,
-                        state.vpp_on,
                     ),
                     (false, VIEW_GANTRY) => ui::draw_gantry(
                         &mut screen,
                         axis,
                         GANTRY_NUMBERS.load(Ordering::Relaxed),
                         state.millivolts,
-                        state.vpp_on,
                     ),
                     (false, VIEW_MUSIC) => media::with_state(|status, vol, title, artist, art| {
                         ui::draw_nowplaying(
@@ -1196,9 +1250,18 @@ async fn main(_spawner: embassy_executor::Spawner) {
                             media::online(),
                         )
                     }),
-                    (false, 4) => ui::test_pattern(&mut screen),
-                    (false, 5) => ui::all_on(&mut screen),
-                    (false, _) => ui::draw(&mut screen, &state),
+                    (false, VIEW_QUOTA) => quota::with_accounts(|accounts| {
+                        ui::draw_quota(&mut screen, accounts, quota::online(), state.millivolts)
+                    }),
+                    (false, VIEW_PATTERN) => ui::test_pattern(&mut screen),
+                    (false, _) => ui::draw_cube(
+                        &mut screen,
+                        &cube,
+                        counts,
+                        held,
+                        zoom,
+                        state.millivolts,
+                    ),
                 }
                 // Nothing to push while the panel has no rail.
                 if boost.on {
@@ -1529,6 +1592,11 @@ fn console_key(byte: u8) {
             AXIS.store(axis as u8, Ordering::Relaxed);
             logln!("axis: {}", ui::AXIS_NAMES[axis]);
         }
+        // What holding a button on the quota screen does, without the puck.
+        b'r' => {
+            quota::request_refresh();
+            logln!("quota: refresh requested");
+        }
         b',' | b'.' => {
             let step = if byte == b'.' { 1 } else { -1 };
             let axis = AXIS.load(Ordering::Relaxed) as usize % 3;
@@ -1594,9 +1662,9 @@ fn machine_line(line: &str) {
             request_reboot(magic)
         }
         _ => {
-            // Media lines first, then the gantry: neither answers for the
-            // other's commands, so order only decides who sees a line first.
-            if !media::handle_line(line) {
+            // Each app claims its own message types and passes on the rest, so
+            // the order here only decides who is asked first, never who wins.
+            if !media::handle_line(line) && !quota::handle_line(line) {
                 gantry::handle_line(line);
             }
         }

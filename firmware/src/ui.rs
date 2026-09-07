@@ -8,28 +8,18 @@ use embedded_graphics::mono_font::MonoTextStyle;
 use embedded_graphics::mono_font::ascii::{FONT_6X10, FONT_10X20};
 use embedded_graphics::pixelcolor::BinaryColor;
 use embedded_graphics::prelude::*;
+use embedded_graphics::draw_target::DrawTargetExt;
 use embedded_graphics::primitives::{Line, PrimitiveStyle, Rectangle};
 use embedded_graphics::text::{Alignment, Baseline, Text, TextStyleBuilder};
 use heapless::String;
 
 use crate::display::Display;
 
-/// 24 dots on a circle of radius 34 about (64, 58), index 0 at the top, going
-/// clockwise - so the lit dot tracks the knob the way your hand expects.
-const RING: [(i32, i32); 24] = [
-    (64, 24), (73, 25), (81, 29), (88, 34), (93, 41), (97, 49), (98, 58), (97, 67),
-    (93, 75), (88, 82), (81, 87), (73, 91), (64, 92), (55, 91), (47, 87), (40, 82),
-    (35, 75), (31, 67), (30, 58), (31, 49), (35, 41), (40, 34), (47, 29), (55, 25),
-];
-
-const LABELS: [&str; 4] = ["1", "2", "3", "SW"];
-
+/// What the render loop reads once a frame and hands to whichever screen is up.
 pub struct State {
     pub detents: i32,
     pub pressed: [bool; 4],
-    pub vpp_on: bool,
     pub millivolts: u16,
-    pub link: &'static str,
 }
 
 /// What the menu offers. The order is the order on screen, and
@@ -90,44 +80,36 @@ pub struct MenuState {
     pub millivolts: u16,
 }
 
-/// Title bar: name, the 12 V flag when it's up, and the battery gauge.
-fn header(d: &mut Display<'_>, millivolts: u16, vpp_on: bool) {
+/// Title bar: which screen you're on, the radio, and the cell.
+///
+/// It used to say `pico2joy` and carry a `12V` flag. Neither earned its pixels.
+/// You can see that it's the puck, and the rail flag was permanently lit - on
+/// this revision Q1 is flipped so the rail can't actually be gated (see the
+/// README), and even on a board where it could, VPP being down means the panel
+/// is dark and nobody is reading the header anyway. The rail still has its menu
+/// row and its line in `p`, which is where a diagnostic belongs.
+///
+/// What does change is which of seven screens is up, and that is worth the
+/// left-hand side now that holding the knob and turning moves between them.
+fn header(d: &mut Display<'_>, millivolts: u16) {
     let on = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-    let fill = PrimitiveStyle::with_fill(BinaryColor::On);
     let small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
     let top_left = TextStyleBuilder::new().baseline(Baseline::Top).build();
+    let top_right = TextStyleBuilder::new()
+        .baseline(Baseline::Top)
+        .alignment(Alignment::Right)
+        .build();
 
-    let _ = Text::with_text_style("pico2joy", Point::new(2, 1), small, top_left).draw(d);
-    if vpp_on {
-        let _ = Text::with_text_style("12V", Point::new(54, 1), small, top_left).draw(d);
-    }
-
-    // Battery: an outline with a nub, filled proportionally, percent to its left.
-    let percent = crate::state::percent_from_mv(millivolts);
-    let mut label: String<8> = String::new();
-    let _ = write!(label, "{percent}%");
-    let _ = Text::with_text_style(
-        &label,
-        Point::new(103, 1),
-        small,
-        TextStyleBuilder::new()
-            .baseline(Baseline::Top)
-            .alignment(Alignment::Right)
-            .build(),
-    )
-    .draw(d);
-
-    let body = Rectangle::new(Point::new(106, 1), Size::new(19, 9));
-    let _ = body.into_styled(on).draw(d);
-    let _ = Rectangle::new(Point::new(125, 4), Size::new(2, 3))
-        .into_styled(fill)
+    let _ = Text::with_text_style(crate::view_label(), Point::new(2, 1), small, top_left)
         .draw(d);
-    let bar = (17 * percent as u32 / 100).min(17);
-    if bar > 0 {
-        let _ = Rectangle::new(Point::new(107, 2), Size::new(bar, 7))
-            .into_styled(fill)
-            .draw(d);
-    }
+
+    // The radio in three characters, and the cell as a number rather than a
+    // picture of one: the icon was the decorative half of that pair.
+    let _ = Text::with_text_style(crate::link_short(), Point::new(98, 1), small, top_right)
+        .draw(d);
+    let mut label: String<8> = String::new();
+    let _ = write!(label, "{}%", crate::state::percent_from_mv(millivolts));
+    let _ = Text::with_text_style(&label, Point::new(126, 1), small, top_right).draw(d);
 
     let _ = Line::new(Point::new(0, 13), Point::new(127, 13))
         .into_styled(on)
@@ -137,7 +119,7 @@ fn header(d: &mut Display<'_>, millivolts: u16, vpp_on: bool) {
 /// The knob-driven menu: turn to move, any of BTN1/2/3 to select, knob to leave.
 pub fn draw_menu(d: &mut Display<'_>, menu: &MenuState) {
     d.clear();
-    header(d, menu.millivolts, menu.vpp_on);
+    header(d, menu.millivolts);
 
     let fill = PrimitiveStyle::with_fill(BinaryColor::On);
     let small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
@@ -193,67 +175,6 @@ pub fn draw_menu(d: &mut Display<'_>, menu: &MenuState) {
     }
 }
 
-pub fn draw(d: &mut Display<'_>, state: &State) {
-    d.clear();
-    header(d, state.millivolts, state.vpp_on);
-
-    let on = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
-    let fill = PrimitiveStyle::with_fill(BinaryColor::On);
-    let small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    let small_inv = MonoTextStyle::new(&FONT_6X10, BinaryColor::Off);
-    let big = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
-    let centred = TextStyleBuilder::new()
-        .baseline(Baseline::Middle)
-        .alignment(Alignment::Center)
-        .build();
-
-    // Encoder ring: every detent moves the filled dot one position.
-    let active = state.detents.rem_euclid(RING.len() as i32) as usize;
-    for (i, (x, y)) in RING.iter().enumerate() {
-        let rect = if i == active {
-            Rectangle::new(Point::new(x - 2, y - 2), Size::new(5, 5))
-        } else {
-            Rectangle::new(Point::new(x - 1, y - 1), Size::new(3, 3))
-        };
-        let _ = rect.into_styled(if i == active { fill } else { on }).draw(d);
-    }
-
-    let mut count: String<12> = String::new();
-    let _ = write!(count, "{}", state.detents);
-    let _ = Text::with_text_style(&count, Point::new(64, 58), big, centred).draw(d);
-
-    // Link state gets the strip between the ring and the pips.
-    let _ = Text::with_text_style(
-        state.link,
-        Point::new(64, 98),
-        small,
-        TextStyleBuilder::new()
-            .baseline(Baseline::Middle)
-            .alignment(Alignment::Center)
-            .build(),
-    )
-    .draw(d);
-
-    // Button pips: outlined when up, solid with inverted label when down.
-    for (i, label) in LABELS.iter().enumerate() {
-        let origin = Point::new(3 + 32 * i as i32, 104);
-        let rect = Rectangle::new(origin, Size::new(26, 20));
-        let down = state.pressed[i];
-        let _ = rect.into_styled(if down { fill } else { on }).draw(d);
-        let style = if down { small_inv } else { small };
-        let _ = Text::with_text_style(
-            label,
-            Point::new(origin.x + 13, origin.y + 10),
-            style,
-            TextStyleBuilder::new()
-                .baseline(Baseline::Middle)
-                .alignment(Alignment::Center)
-                .build(),
-        )
-        .draw(d);
-    }
-}
-
 /// What the puck shows while it hands itself to the bootloader. A flash takes a
 /// few seconds and the screen would otherwise just go dark, which looks exactly
 /// like a board that died - so say what is happening, and say not to unplug.
@@ -274,15 +195,6 @@ pub fn draw_flashing(d: &mut Display<'_>, mode: &str) {
     let _ = Text::with_text_style("FLASHING", Point::new(64, 54), big, centred).draw(d);
     let _ = Text::with_text_style(mode, Point::new(64, 72), small, centred).draw(d);
     let _ = Text::with_text_style("keep it plugged in", Point::new(64, 84), small, centred)
-        .draw(d);
-}
-
-/// Every pixel lit: maximum draw on VPP and the least ambiguous "is this panel
-/// alive at all" test there is. 100% display area is still only ~25 uA of IPP.
-pub fn all_on(d: &mut Display<'_>) {
-    d.clear();
-    let _ = Rectangle::new(Point::zero(), Size::new(128, 128))
-        .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
         .draw(d);
 }
 
@@ -308,9 +220,9 @@ impl core::fmt::Display for Millimetres {
 /// A wheel rather than a list because the input is a wheel - the thing in your
 /// hand goes round, so the choices go round, and "two clicks anticlockwise" is
 /// a gesture you can make without reading the screen twice.
-pub fn draw_wheel(d: &mut Display<'_>, selected: usize, millivolts: u16, vpp_on: bool) {
+pub fn draw_wheel(d: &mut Display<'_>, selected: usize, millivolts: u16) {
     d.clear();
-    header(d, millivolts, vpp_on);
+    header(d, millivolts);
 
     let on = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
     let fill = PrimitiveStyle::with_fill(BinaryColor::On);
@@ -425,10 +337,9 @@ pub fn draw_gantry(
     selected: usize,
     show_numbers: bool,
     millivolts: u16,
-    vpp_on: bool,
 ) {
     d.clear();
-    header(d, millivolts, vpp_on);
+    header(d, millivolts);
 
     let on = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
     let fill = PrimitiveStyle::with_fill(BinaryColor::On);
@@ -581,10 +492,9 @@ pub fn draw_cube(
     held: Option<usize>,
     zoom: i32,
     millivolts: u16,
-    vpp_on: bool,
 ) {
     d.clear();
-    header(d, millivolts, vpp_on);
+    header(d, millivolts);
 
     cube.wireframe(d, zoom);
 
@@ -673,6 +583,239 @@ pub fn test_pattern(d: &mut Display<'_>) {
             .build(),
     )
     .draw(d);
+}
+
+/// A duration as the coarsest unit that still says something useful: "6d23h",
+/// "1h47m", "43m", "9s". A rate-limit window is not a stopwatch, so the seconds
+/// only appear in the last minute, when they are the whole story.
+///
+/// Five characters at most, deliberately: on the quota screen this sits at the
+/// right of a line that also carries a name and a sessions badge, and a
+/// six-character form (`59m03s`) would run into the badge.
+pub struct Countdown(pub Option<u32>);
+
+impl core::fmt::Display for Countdown {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let seconds = match self.0 {
+            Some(seconds) => seconds,
+            None => return write!(f, "--"),
+        };
+        let (days, hours) = (seconds / 86_400, seconds / 3600 % 24);
+        let minutes = seconds / 60 % 60;
+        if days > 0 {
+            write!(f, "{days}d{hours}h")
+        } else if hours > 0 {
+            write!(f, "{hours}h{minutes:02}m")
+        } else if minutes > 0 {
+            write!(f, "{minutes}m")
+        } else {
+            write!(f, "{}s", seconds % 60)
+        }
+    }
+}
+
+/// The first `chars` characters of `s`. By character, not by byte: a bridge is
+/// free to send a name with an accent in it, and slicing that mid-codepoint
+/// would panic the firmware over a label.
+fn clip(s: &str, chars: usize) -> &str {
+    match s.char_indices().nth(chars) {
+        Some((at, _)) => &s[..at],
+        None => s,
+    }
+}
+
+/// One statistic as a full-width bar with its own label riding on it: the name
+/// on the left, the number on the right, the fill showing the proportion.
+///
+/// The text is drawn twice, clipped to either side of the fill boundary - lit
+/// over the empty part, dark over the filled part - so it stays legible at every
+/// value instead of disappearing into the bar somewhere around half way. That
+/// trick is the whole reason a bar can carry its own label here rather than
+/// needing a caption line above it, which is what buys the room for six of them
+/// on a 128-pixel screen.
+fn stat_bar(d: &mut Display<'_>, area: Rectangle, percent: u32, left: &str, right: &str) {
+    let on = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let fill = PrimitiveStyle::with_fill(BinaryColor::On);
+    let _ = area.into_styled(on).draw(d);
+
+    let inner = Rectangle::new(
+        area.top_left + Point::new(1, 1),
+        Size::new(area.size.width - 2, area.size.height - 2),
+    );
+    let filled = inner.size.width * percent.min(100) / 100;
+    if filled > 0 {
+        let _ = Rectangle::new(inner.top_left, Size::new(filled, inner.size.height))
+            .into_styled(fill)
+            .draw(d);
+    }
+
+    let middle = area.top_left.y + area.size.height as i32 / 2;
+    let centred_left = TextStyleBuilder::new().baseline(Baseline::Middle).build();
+    let centred_right = TextStyleBuilder::new()
+        .baseline(Baseline::Middle)
+        .alignment(Alignment::Right)
+        .build();
+    let at_left = Point::new(area.top_left.x + 3, middle);
+    let at_right = Point::new(area.top_left.x + area.size.width as i32 - 3, middle);
+
+    let over_fill = Rectangle::new(inner.top_left, Size::new(filled, inner.size.height));
+    let over_gap = Rectangle::new(
+        inner.top_left + Point::new(filled as i32, 0),
+        Size::new(inner.size.width - filled, inner.size.height),
+    );
+    for (area, colour) in [(over_fill, BinaryColor::Off), (over_gap, BinaryColor::On)] {
+        let style = MonoTextStyle::new(&FONT_6X10, colour);
+        let mut region = d.clipped(&area);
+        let _ = Text::with_text_style(left, at_left, style, centred_left).draw(&mut region);
+        let _ = Text::with_text_style(right, at_right, style, centred_right).draw(&mut region);
+    }
+}
+
+/// The quota screen: how much of each subscription's rate-limit window is spent,
+/// and how long until it starts again.
+///
+/// A view of the host - see [`crate::quota`] - so with no bridge talking it says
+/// so rather than showing percentages from an hour ago.
+///
+/// Every account is fully drawn, every time: a name line carrying the vendor and
+/// the countdown to the short window's reset, then a bar for that window and a
+/// thinner one for the week. There is nothing to select and nothing to page
+/// through, which is the point - the question this screen answers is "where do I
+/// stand", and an answer you have to press a button to finish reading is a worse
+/// answer. Holding a button asks the bridge to look again, and that is the only
+/// control here.
+pub fn draw_quota(
+    d: &mut Display<'_>,
+    accounts: &[crate::quota::Account],
+    online: bool,
+    millivolts: u16,
+) {
+    d.clear();
+    header(d, millivolts);
+
+    let on = PrimitiveStyle::with_stroke(BinaryColor::On, 1);
+    let fill = PrimitiveStyle::with_fill(BinaryColor::On);
+    let small = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let top_left = TextStyleBuilder::new().baseline(Baseline::Top).build();
+    let top_right = TextStyleBuilder::new()
+        .baseline(Baseline::Top)
+        .alignment(Alignment::Right)
+        .build();
+    let centred = TextStyleBuilder::new()
+        .baseline(Baseline::Middle)
+        .alignment(Alignment::Center)
+        .build();
+
+    if !online || accounts.is_empty() {
+        let (what, how) = if online {
+            ("no accounts", "check --claude/--codex")
+        } else {
+            ("no bridge", "run pico2joy.py quota")
+        };
+        let _ = Text::with_text_style(what, Point::new(64, 58), small, centred).draw(d);
+        let _ = Text::with_text_style(how, Point::new(64, 72), small, centred).draw(d);
+        return;
+    }
+
+    // Below the title bar, split evenly, capped so one lonely account doesn't get
+    // a bar you could land a plane on, and centred in what's left over.
+    const TOP: i32 = 15;
+    const NAME_H: i32 = 10;
+    const GAP: i32 = 1;
+    let avail = 128 - TOP;
+    let count = accounts.len() as i32;
+    let block = (avail / count).min(44);
+    let top = TOP + (avail - block * count) / 2;
+
+    // The short window gets the fatter bar: it is the one that decides whether
+    // you can keep working in the next ten minutes.
+    let bars = block - NAME_H - GAP * 3;
+    let short_h = (bars * 55 / 100).max(7);
+    let long_h = (bars - short_h).max(7);
+
+    for (slot, account) in accounts.iter().enumerate() {
+        // No rule between blocks: the bar above one account's name is already
+        // the line under the last one's, and drawing both put two strokes in
+        // the same two pixels.
+        let t = top + block * slot as i32;
+
+        // How many sessions this account has running, as a filled badge - drawn
+        // only when there are any, so an idle plan's line stays clean and a busy
+        // one announces itself. Neither vendor reports this; the bridge counts
+        // the CLI processes on the machine the account is logged in on, which is
+        // the only place the answer exists.
+        let running = account.sessions.filter(|&n| n > 0);
+
+        // The name takes whatever the rest of the line leaves it: thirteen
+        // characters when the badge is absent, eleven when it isn't. The
+        // countdown is five at most by construction - see [`Countdown`].
+        let mut who: String<24> = String::new();
+        let _ = write!(who, "{} {}", account.kind_label(), account.label);
+        let room = if running.is_some() { 11 } else { 13 };
+        let _ = Text::with_text_style(clip(&who, room), Point::new(2, t), small, top_left)
+            .draw(d);
+
+        if account.state != crate::quota::STATE_OK {
+            // One box where the bars go, saying what is wrong. A percentage from
+            // before the token expired would be worse than no percentage.
+            let what = match account.state {
+                crate::quota::STATE_AUTH => "log in again",
+                crate::quota::STATE_WAIT => "asking...",
+                crate::quota::STATE_ERROR => "no reply",
+                _ => "?",
+            };
+            let box_ = Rectangle::new(
+                Point::new(0, t + NAME_H + GAP),
+                Size::new(128, (short_h + long_h + GAP) as u32),
+            );
+            let _ = box_.into_styled(on).draw(d);
+            let _ = Text::with_text_style(
+                what,
+                Point::new(64, box_.top_left.y + box_.size.height as i32 / 2),
+                small,
+                centred,
+            )
+            .draw(d);
+            continue;
+        }
+
+        let mut when: String<12> = String::new();
+        let _ = write!(when, "{}", Countdown(account.five.remaining_s()));
+        let _ = Text::with_text_style(&when, Point::new(126, t), small, top_right).draw(d);
+
+        if let Some(running) = running {
+            let badge = Rectangle::new(Point::new(76, t), Size::new(14, 10));
+            let _ = badge.into_styled(fill).draw(d);
+            let mut count: String<4> = String::new();
+            let _ = write!(count, "{}", running.min(99));
+            let _ = Text::with_text_style(
+                &count,
+                Point::new(83, t + 5),
+                MonoTextStyle::new(&FONT_6X10, BinaryColor::Off),
+                centred,
+            )
+            .draw(d);
+        }
+
+        for (window, name, y, height) in [
+            (account.five, &account.five_name, t + NAME_H + GAP, short_h),
+            (account.week, &account.week_name, t + NAME_H + GAP * 2 + short_h, long_h),
+        ] {
+            let mut value: String<8> = String::new();
+            if window.percent == crate::quota::UNKNOWN {
+                let _ = write!(value, "--");
+            } else {
+                let _ = write!(value, "{}%", window.percent);
+            }
+            stat_bar(
+                d,
+                Rectangle::new(Point::new(0, y), Size::new(128, height as u32)),
+                window.filled(),
+                name,
+                &value,
+            );
+        }
+    }
 }
 
 /// The now-playing screen: the cover as a full-screen background with a dark
