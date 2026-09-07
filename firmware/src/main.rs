@@ -46,7 +46,7 @@ mod ui;
 
 use core::cell::RefCell;
 use core::fmt::Write as _;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32, Ordering};
 
 use embassy_futures::join::{join3, join5};
 use embassy_nrf::config::HfclkSource;
@@ -66,7 +66,7 @@ use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, Sender, State};
 use embassy_usb::{Builder, Config};
-use heapless::String;
+use heapless::{String, Vec};
 
 use crate::display::Display;
 
@@ -126,6 +126,36 @@ const HELP: &str = concat!(
     "          l led (dark/dim/on) | v verbose | b bootloader (UF2)\r\n",
     "          #r uf2|serial|ota  reboot into a bootloader mode\r\n"
 );
+
+/// What a host gets for opening the port.
+const GREETING: &str = "\r\npico2joy bring-up (nice!nano v2, embassy)\r\n";
+
+/// Linux hands over every freshly enumerated ttyACM in cooked mode with echo
+/// on (`stty -a` on a just-plugged puck says `echo`), and a tty with echo on
+/// reflects everything we print straight back into the command parser. The
+/// greeting alone spells `p`, `i`, `2` and then `b` - a reboot into the
+/// bootloader, which on battery is where it stays until someone reflashes it.
+///
+/// Three things keep that from happening. Nothing is written unless DTR is
+/// up, so no packet sits in the IN endpoint waiting to be delivered (and
+/// echoed) during the host's `open()`, before whatever opened it has had the
+/// chance to set raw mode. The greeting waits [`GREETING_DELAY`] after DTR
+/// rises, which is longer than any tool takes between `open()` and
+/// `tcsetattr()`. And for [`ECHO_WINDOW`] after the greeting goes out, keys
+/// are held rather than dispatched while the parser watches for its own
+/// greeting coming back: [`ECHO_SCORE`] received bytes that occur in this
+/// line, in order, is an echo, not a person, and single keys are ignored
+/// until the port is reopened. In order but not necessarily adjacent, and
+/// never released on a mismatch, because the kernel's echo is lossy - one
+/// byte per USB packet, and it drops most of a burst once the write URBs
+/// are all in flight - so "pico2joy bring-" followed by fragments is what
+/// actually comes back. A person typing in that first second gets their
+/// keys when the window closes. `#` lines are never held, since nothing we
+/// print can spell one that does harm.
+const ECHO_PROBE: &[u8] = GREETING.trim_ascii().as_bytes();
+const ECHO_WINDOW: Duration = Duration::from_millis(1000);
+const ECHO_SCORE: usize = 4;
+const GREETING_DELAY: Duration = Duration::from_millis(100);
 
 type Line = String<192>;
 
@@ -195,6 +225,12 @@ static PANIC_MESSAGE: Mutex<CriticalSectionRawMutex, RefCell<Option<Line>>> =
 /// 0 for "nothing pending". Going through the render loop is what buys the
 /// screen a chance to say so - the reset itself is instant.
 static REQ_REBOOT: AtomicU8 = AtomicU8::new(0);
+/// The host is echoing our output back at us - see [`ECHO_PROBE`]. Set by the
+/// command parser, cleared by the writer whenever DTR changes.
+static ECHO_MUTED: AtomicBool = AtomicBool::new(false);
+/// When the greeting last went out, in ms since boot (never 0), for the
+/// [`ECHO_WINDOW`] that follows it.
+static GREETED_MS: AtomicU32 = AtomicU32::new(0);
 
 static REQ_HELP: AtomicBool = AtomicBool::new(false);
 static REQ_PINS: AtomicBool = AtomicBool::new(false);
@@ -443,10 +479,53 @@ async fn main(_spawner: embassy_executor::Spawner) {
         // The machine channel shares the port with the console: '#' opens a line
         // for [`gantry`] to parse, everything else stays a single keystroke.
         let mut proto: String<96> = String::new();
-        let mut in_proto = false;
+        let mut in_proto;
+        // Keys held back during the echo window, see [`ECHO_PROBE`].
+        let mut held: Vec<u8, 32> = Vec::new();
+        // How far into the greeting the echo has got, and how many bytes have
+        // agreed with it.
+        let mut cursor = 0usize;
+        let mut score = 0usize;
+        // The greeting they belong to: a new one starts them over.
+        let mut armed = 0u32;
+        fn release(held: &mut Vec<u8, 32>) {
+            for &byte in held.iter() {
+                console_key(byte);
+            }
+            held.clear();
+        }
+        // Time left in the echo window, if it is open.
+        fn echo_window() -> Option<Duration> {
+            let greeted = GREETED_MS.load(Ordering::Relaxed);
+            if greeted == 0 {
+                return None;
+            }
+            let since = (Instant::now().as_millis() as u32).wrapping_sub(greeted);
+            ECHO_WINDOW.as_millis().checked_sub(since as u64).map(Duration::from_millis)
+        }
         loop {
             rx.wait_connection().await;
-            while let Ok(n) = rx.read_packet(&mut buf).await {
+            in_proto = false;
+            held.clear();
+            loop {
+                // Keys held for the window are released when it closes, even
+                // if nothing else arrives.
+                let read = match echo_window() {
+                    Some(left) if !held.is_empty() => {
+                        match with_timeout(left, rx.read_packet(&mut buf)).await {
+                            Ok(read) => read,
+                            Err(_) => {
+                                release(&mut held);
+                                continue;
+                            }
+                        }
+                    }
+                    _ => {
+                        release(&mut held);
+                        rx.read_packet(&mut buf).await
+                    }
+                };
+                let Ok(n) = read else { break };
                 for &byte in &buf[..n] {
                     if in_proto {
                         // '#' never appears inside a line, so seeing one means
@@ -467,67 +546,45 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         }
                         continue;
                     }
-                    match byte {
-                        // Opens the machine channel. Deliberately the *only*
-                        // way to reach anything destructive: a single key that
-                        // rebooted the puck would also fire on the tail of a
-                        // protocol line whose '#' went missing, and "#s ..."
-                        // ends up spelling console commands.
-                        b'#' => {
-                            in_proto = true;
-                            proto.clear();
-                        }
-                        b'?' | b'h' => REQ_HELP.store(true, Ordering::Relaxed),
-                        b'p' => REQ_PINS.store(true, Ordering::Relaxed),
-                        // Handy without hands on the puck.
-                        b'm' => {
-                            let open = !MENU_OPEN.fetch_xor(true, Ordering::Relaxed);
-                            logln!("menu: {}", if open { "open" } else { "closed" });
-                        }
-                        b'e' => REQ_BOOST.store(true, Ordering::Relaxed),
-                        // Axis select and jog from the console: the same model
-                        // the buttons and knob drive, for testing without hands
-                        // on the puck (and a hook for driving it from a host).
-                        b'1' | b'2' | b'3' => {
-                            let axis = BUTTON_AXIS[(byte - b'1') as usize];
-                            AXIS.store(axis as u8, Ordering::Relaxed);
-                            logln!("axis: {}", ui::AXIS_NAMES[axis]);
-                        }
-                        b',' | b'.' => {
-                            let step = if byte == b'.' { 1 } else { -1 };
-                            let axis = AXIS.load(Ordering::Relaxed) as usize % 3;
-                            let jogged =
-                                AXIS_COUNTS[axis].fetch_add(step, Ordering::Relaxed) + step;
-                            logln!("jog {}={jogged}", ui::AXIS_NAMES[axis]);
-                        }
-                        b'd' => REQ_VIEW.store(true, Ordering::Relaxed),
-                        b'i' => REQ_REINIT.store(true, Ordering::Relaxed),
-                        b'f' => REQ_FLIP.store(true, Ordering::Relaxed),
-                        b'+' | b'=' => REQ_BRIGHTER.store(true, Ordering::Relaxed),
-                        b'-' | b'_' => REQ_DIMMER.store(true, Ordering::Relaxed),
-                        b'v' => {
-                            VERBOSE.fetch_xor(true, Ordering::Relaxed);
-                        }
-                        b'l' => {
-                            let mode = (LED_MODE.load(Ordering::Relaxed) + 1) % 3;
-                            LED_MODE.store(mode, Ordering::Relaxed);
+                    // Opens the machine channel. Deliberately the *only* way
+                    // to reach anything destructive: a single key that
+                    // rebooted the puck would also fire on the tail of a
+                    // protocol line whose '#' went missing, and "#s ..." ends
+                    // up spelling console commands.
+                    if byte == b'#' {
+                        release(&mut held);
+                        in_proto = true;
+                        proto.clear();
+                        continue;
+                    }
+                    if ECHO_MUTED.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    if echo_window().is_none() {
+                        release(&mut held);
+                        console_key(byte);
+                        continue;
+                    }
+                    // Inside the window: hold the key, and see whether it is
+                    // the next thing an echo of the greeting would contain.
+                    let greeted = GREETED_MS.load(Ordering::Relaxed);
+                    if greeted != armed {
+                        armed = greeted;
+                        cursor = 0;
+                        score = 0;
+                    }
+                    let _ = held.push(byte);
+                    if let Some(at) = ECHO_PROBE[cursor..].iter().position(|&c| c == byte) {
+                        cursor += at + 1;
+                        score += 1;
+                        if score >= ECHO_SCORE {
+                            held.clear();
+                            ECHO_MUTED.store(true, Ordering::Relaxed);
                             logln!(
-                                "led: {}",
-                                match mode {
-                                    0 => "dark",
-                                    2 => "on",
-                                    _ => "dim heartbeat",
-                                }
+                                "the host echoes what we send - console keys ignored until \
+                                 the port is reopened (stty -F <port> raw -echo)"
                             );
                         }
-                        b'w' => {
-                            let on = !RADIO_ON.fetch_xor(true, Ordering::Relaxed);
-                            logln!("radio: advertising {}", if on { "on" } else { "off" });
-                        }
-                        // Reboot into UF2 mode, so reflashing doesn't need the
-                        // reset button under the puck.
-                        b'b' => request_reboot(DFU_MAGIC_UF2_RESET),
-                        _ => {}
                     }
                 }
             }
@@ -551,8 +608,19 @@ async fn main(_spawner: embassy_executor::Spawner) {
             if was_open && !open && tx.line_coding().data_rate() == 1200 {
                 request_reboot(DFU_MAGIC_UF2_RESET);
             }
+            if open != was_open {
+                ECHO_MUTED.store(false, Ordering::Relaxed);
+            }
             if open && !was_open {
-                emit(&mut tx, "\r\npico2joy bring-up (nice!nano v2, embassy)\r\n").await;
+                // Whoever opened the port is still putting it into raw mode;
+                // say nothing they could echo back at us until they have.
+                // See [`ECHO_PROBE`].
+                Timer::after(GREETING_DELAY).await;
+                if !tx.dtr() {
+                    continue;
+                }
+                emit(&mut tx, GREETING).await;
+                GREETED_MS.store((Instant::now().as_millis() as u32).max(1), Ordering::Relaxed);
                 let mut line: Line = String::new();
                 let reason = RESET_REASON.lock(|cell| *cell.borrow());
                 let ms = Instant::now().as_millis();
@@ -1398,6 +1466,64 @@ fn reboot_to_bootloader(magic: u8) -> ! {
     cortex_m::peripheral::SCB::sys_reset()
 }
 
+/// One console keystroke. Everything here is a request flag or a counter, so
+/// it can run from wherever the byte turned up.
+fn console_key(byte: u8) {
+    match byte {
+        b'?' | b'h' => REQ_HELP.store(true, Ordering::Relaxed),
+        b'p' => REQ_PINS.store(true, Ordering::Relaxed),
+        // Handy without hands on the puck.
+        b'm' => {
+            let open = !MENU_OPEN.fetch_xor(true, Ordering::Relaxed);
+            logln!("menu: {}", if open { "open" } else { "closed" });
+        }
+        b'e' => REQ_BOOST.store(true, Ordering::Relaxed),
+        // Axis select and jog from the console: the same model
+        // the buttons and knob drive, for testing without hands
+        // on the puck (and a hook for driving it from a host).
+        b'1' | b'2' | b'3' => {
+            let axis = BUTTON_AXIS[(byte - b'1') as usize];
+            AXIS.store(axis as u8, Ordering::Relaxed);
+            logln!("axis: {}", ui::AXIS_NAMES[axis]);
+        }
+        b',' | b'.' => {
+            let step = if byte == b'.' { 1 } else { -1 };
+            let axis = AXIS.load(Ordering::Relaxed) as usize % 3;
+            let jogged =
+                AXIS_COUNTS[axis].fetch_add(step, Ordering::Relaxed) + step;
+            logln!("jog {}={jogged}", ui::AXIS_NAMES[axis]);
+        }
+        b'd' => REQ_VIEW.store(true, Ordering::Relaxed),
+        b'i' => REQ_REINIT.store(true, Ordering::Relaxed),
+        b'f' => REQ_FLIP.store(true, Ordering::Relaxed),
+        b'+' | b'=' => REQ_BRIGHTER.store(true, Ordering::Relaxed),
+        b'-' | b'_' => REQ_DIMMER.store(true, Ordering::Relaxed),
+        b'v' => {
+            VERBOSE.fetch_xor(true, Ordering::Relaxed);
+        }
+        b'l' => {
+            let mode = (LED_MODE.load(Ordering::Relaxed) + 1) % 3;
+            LED_MODE.store(mode, Ordering::Relaxed);
+            logln!(
+                "led: {}",
+                match mode {
+                    0 => "dark",
+                    2 => "on",
+                    _ => "dim heartbeat",
+                }
+            );
+        }
+        b'w' => {
+            let on = !RADIO_ON.fetch_xor(true, Ordering::Relaxed);
+            logln!("radio: advertising {}", if on { "on" } else { "off" });
+        }
+        // Reboot into UF2 mode, so reflashing doesn't need the
+        // reset button under the puck.
+        b'b' => request_reboot(DFU_MAGIC_UF2_RESET),
+        _ => {}
+    }
+}
+
 /// One line off the machine channel, whichever transport carried it. USB and
 /// BLE both land here so the host tool speaks one protocol either way.
 fn machine_line(line: &str) {
@@ -1427,6 +1553,12 @@ async fn emit<'d, D: embassy_usb::driver::Driver<'d>>(tx: &mut Sender<'d, D>, s:
     let max = tx.max_packet_size() as usize;
     let bytes = s.as_bytes();
     for chunk in bytes.chunks(max) {
+        // A packet written with nobody reading sits in the IN endpoint until
+        // the next open(), and is handed over - and echoed, on a cooked tty -
+        // before the opener can set raw mode. See [`ECHO_PROBE`].
+        if !tx.dtr() {
+            return;
+        }
         if with_timeout(Duration::from_millis(20), tx.write_packet(chunk))
             .await
             .is_err()

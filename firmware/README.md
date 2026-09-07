@@ -54,7 +54,16 @@ bootloader's, `1209:0001 softek pico2joy bring-up`:
 picocom -b 115200 /dev/ttyACM1     # baud is ignored, it's USB CDC
 ```
 
-Opening the port prints a banner; then events stream as you use the puck:
+Opening the port prints a banner; then events stream as you use the puck.
+Set the port raw first, as picocom and `pico2joy.py` do: Linux hands every
+freshly enumerated ttyACM over cooked, with echo on, and a tty with echo on
+sends everything the puck prints straight back into its command parser — the
+banner alone spells `p`, `i`, `2` and then `b`, a reboot into the bootloader.
+The firmware defends itself (`ECHO_PROBE` in `main.rs`): it writes nothing
+until DTR is up and the opener has had 100 ms to go raw, and if its own
+greeting comes back it ignores single keys until the port is reopened, `#`
+lines excepted. So a bare `cat /dev/ttyACM0` gets a warning line rather than a
+puck stuck on the `FLASHING` screen.
 
 ```
 [   12.345] BTN1 down
