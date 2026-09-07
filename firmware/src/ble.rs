@@ -313,6 +313,23 @@ async fn try_run<F: FnMut() -> Payload>(p: Claimed, mut snapshot: F) -> Result<(
             crate::LINK_STATE.store(3, core::sync::atomic::Ordering::Relaxed);
             crate::logln!("ble: connected");
 
+            // The central picks the connection parameters, and this puck has no
+            // say in them. The standard way for a peripheral to ask is the GAP
+            // "Peripheral Preferred Connection Parameters" characteristic, which
+            // is a TODO in trouble-host 0.8 (`gap.rs`, `PeripheralConfig`); the
+            // other way, an HCI LE Connection Update, needs
+            // `sdc_hci_cmd_le_conn_update`, which the controller only links in
+            // for a build that supports the central role - flash we would be
+            // spending to get one symbol.
+            //
+            // So a Linux host's defaults apply, and its supervision timeout is
+            // short enough that one missed window tears the link down. That is
+            // survivable rather than fatal: `BleLink` in tools/pico2joy.py puts
+            // the link straight back and the relay resends everything, so a
+            // dropout costs a few seconds. If it ever needs to cost nothing,
+            // the fix is BlueZ's `[LE] ConnectionSupervisionTimeout` on the host
+            // - see the README - or PPCP here once the stack grows it.
+
             let mut incoming = LineBuffer::default();
             loop {
                 let next = select3(

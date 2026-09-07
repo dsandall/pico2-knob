@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the bring-up firmware and package it as a UF2 for the nice!nano's
-# bootloader. Pass --flash to also copy it onto a mounted UF2 drive, and
+# bootloader. The default build has the connectable BLE link; --no-ble gives the
+# broadcast-only one. Pass --flash to also copy it onto a mounted UF2 drive, and
 # --offset-1000 to link over the SoftDevice slot (see README).
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -14,10 +15,13 @@ for arg in "$@"; do
     --flash) FLASH=1 ;;
     --dfu) DFU=1 ;;
     --offset-1000) FEATURES+=(--features app-offset-1000); NAME=pico2joy-bringup-0x1000 ;;
-    # The BLE build needs MPSL's critical-section implementation instead of the
-    # single-core one, which means dropping the default features.
-    --ble) FEATURES+=(--no-default-features --features ble); NAME=pico2joy-bringup-ble ;;
-    *) echo "usage: $0 [--flash] [--dfu] [--ble] [--offset-1000]" >&2; exit 2 ;;
+    # The broadcast-only build wants the single-core critical section instead of
+    # MPSL's, which means dropping the default features rather than adding to
+    # them - the two implementations cannot both be linked.
+    --no-ble) FEATURES+=(--no-default-features --features cs-single-core); NAME=pico2joy-bringup-noble ;;
+    # What the BLE build used to be called, back when it was the exception.
+    --ble) echo "note: BLE is the default now; --ble does nothing" >&2 ;;
+    *) echo "usage: $0 [--flash] [--dfu] [--no-ble] [--offset-1000]" >&2; exit 2 ;;
   esac
 done
 

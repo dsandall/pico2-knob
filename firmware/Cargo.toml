@@ -6,12 +6,19 @@ description = "Bring-up firmware for the pico2-knob / pico2joy puck (nice!nano v
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["cs-single-core"]
+# The connectable link is the default: the puck's whole point is being wireless,
+# and the host relay follows it over BLE for as long as it is powered. The
+# broadcast-only build is still here (`./build.sh --no-ble`) as the small,
+# simple fallback - it is a quarter of the flash and has no radio stack to go
+# wrong - but it cannot accept a connection, so nothing above it works.
+default = ["ble"]
 
-# Critical sections: the plain single-core implementation is right for the USB-only
-# build, but MPSL needs its own (blanket interrupt masking would wreck radio
-# timing). They are mutually exclusive, hence a feature for each and
-# `--no-default-features --features ble` for the radio build - see ble.sh.
+# Critical sections: the plain single-core implementation is right for the
+# broadcast-only build, but MPSL needs its own (blanket interrupt masking would
+# wreck radio timing). They are mutually exclusive - enabling both links two
+# implementations - hence a feature for each, and
+# `--no-default-features --features cs-single-core` for the build without a
+# radio stack.
 cs-single-core = ["cortex-m/critical-section-single-core"]
 
 # Connectable BLE link: trouble-host on the Nordic SoftDevice Controller. Takes
