@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.9"
-# dependencies = ["bleak>=0.22"]
+# dependencies = ["bleak>=0.22", "pillow>=10"]
 # ///
 """One program for talking to the pico2joy puck, over USB or Bluetooth.
 
@@ -839,6 +839,254 @@ def cmd_gantry(args):
     return 0
 
 
+# --------------------------------------------------------------------------
+# the media player (MPRIS, via playerctl)
+# --------------------------------------------------------------------------
+
+# The device's OLED is 128x128, one bit per pixel, and its framebuffer is 16
+# pages of 128 columns with the low bit at the top - and the panel's RAM sits 90
+# degrees to the glass, so a logical pixel (x, y) lands at panel column y, row
+# 127 - x (see Display::set_pixel in src/display.rs). We pack the cover into that
+# exact layout here so the firmware can blit it in one memcpy.
+ART_W = ART_H = 128
+ART_BYTES = ART_W * ART_H // 8
+ART_CHUNK = 40          # bytes per '#a' line; 80 hex chars, inside the 96 cap
+VOL_STEP = 5            # percent per knob detent
+
+
+class Player:
+    """Whatever MPRIS player is active, plus the host's own output volume.
+
+    Control and now-playing go through `playerctl` (following `playerctld`, so it
+    tracks the player you last touched); volume is the host sink via `wpctl`, or
+    `pactl` if wireplumber isn't the one in charge. Both are plain subprocesses -
+    no D-Bus binding to install.
+    """
+
+    def __init__(self):
+        if not shutil.which("playerctl"):
+            raise SystemExit("this needs `playerctl` (pacman -S playerctl, apt install playerctl)")
+        self.pc = ["playerctl", "-p", "playerctld"]
+        if shutil.which("wpctl"):
+            self.sink = "wpctl"
+        elif shutil.which("pactl"):
+            self.sink = "pactl"
+        else:
+            self.sink = None
+            log("no wpctl or pactl found - volume control disabled")
+
+    def _run(self, args):
+        try:
+            out = subprocess.run(args, capture_output=True, text=True, timeout=2)
+            return out.stdout.strip() if out.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    def now_playing(self):
+        """(status, title, artist, art_url). status is 0 stopped / 1 playing / 2 paused."""
+        fmt = "{{status}}\x1f{{title}}\x1f{{artist}}\x1f{{mpris:artUrl}}"
+        out = self._run(self.pc + ["metadata", "--format", fmt])
+        if not out:
+            return (0, "", "", "")
+        parts = (out.split("\x1f") + ["", "", "", ""])[:4]
+        status = {"Playing": 1, "Paused": 2}.get(parts[0], 0)
+        return (status, parts[1], parts[2], parts[3])
+
+    def play_pause(self):
+        self._run(self.pc + ["play-pause"])
+
+    def next(self):
+        self._run(self.pc + ["next"])
+
+    def previous(self):
+        self._run(self.pc + ["previous"])
+
+    def volume(self):
+        """Host output volume, 0-100, or None if it can't be read."""
+        if self.sink == "wpctl":
+            out = self._run(["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"])
+            if out and out.startswith("Volume:"):
+                try:
+                    return max(0, min(100, round(float(out.split()[1]) * 100)))
+                except (IndexError, ValueError):
+                    return None
+        elif self.sink == "pactl":
+            out = self._run(["pactl", "get-sink-volume", "@DEFAULT_SINK@"])
+            if out and "%" in out:
+                try:
+                    return int(out.split("/")[1].strip().rstrip("%"))
+                except (IndexError, ValueError):
+                    return None
+        return None
+
+    def nudge_volume(self, steps):
+        pct = abs(steps) * VOL_STEP
+        sign = "+" if steps > 0 else "-"
+        if self.sink == "wpctl":
+            self._run(["wpctl", "set-volume", "-l", "1.0",
+                       "@DEFAULT_AUDIO_SINK@", "%d%%%s" % (pct, sign)])
+        elif self.sink == "pactl":
+            self._run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", "%s%d%%" % (sign, pct)])
+
+
+def cover_framebuffer(url):
+    """Fetch an art URL and pack it into the device's 2048-byte 1bpp framebuffer.
+
+    Returns None if there's no art or it can't be decoded. Pillow does the
+    decode, resize and Floyd-Steinberg dither; a lit bit is a bright part of the
+    image, so the cover reads the right way round on the panel.
+    """
+    if not url:
+        return None
+    try:
+        from PIL import Image
+    except ImportError:
+        raise SystemExit("album art needs pillow: run this with `uv run tools/pico2joy.py …`")
+    try:
+        if url.startswith("file://"):
+            image = Image.open(url[7:])
+        else:
+            import io
+            import urllib.request
+            data = urllib.request.urlopen(url, timeout=10).read()
+            image = Image.open(io.BytesIO(data))
+        mono = image.convert("L").resize((ART_W, ART_H), Image.LANCZOS).convert("1")
+    except (OSError, ValueError) as error:
+        log("cover: %s" % error)
+        return None
+
+    px = mono.load()
+    fb = bytearray(ART_BYTES)
+    for x in range(ART_W):            # logical column, left to right
+        for y in range(ART_H):        # logical row, top to bottom
+            if px[x, y]:              # 255 (white) -> lit
+                row = ART_H - 1 - x
+                fb[(row // 8) * ART_W + y] |= 1 << (row % 8)
+    return bytes(fb)
+
+
+class Media:
+    """Relay between the puck and the active player. The puck is a view: it shows
+    what the player reports and asks for changes; it is never the source of truth."""
+
+    def __init__(self, link, player, args):
+        self.link = link
+        self.player = player
+        self.args = args
+        self.last = None            # (status, title, artist) last sent
+        self.last_vol = None
+        self.last_art_url = None
+
+    def reopen(self):
+        try:
+            self.link.close()
+        except OSError:
+            pass
+        for _ in range(20):
+            time.sleep(1.0)
+            try:
+                self.link = open_link(self.args)
+                self.last = self.last_vol = self.last_art_url = None
+                return True
+            except SystemExit:
+                continue
+        log("puck did not come back")
+        return False
+
+    def handle(self, line):
+        fields = line.split()
+        if not fields or fields[0] not in ("#m", "m"):
+            return
+        what = fields[1] if len(fields) > 1 else ""
+        if what == "p":
+            self.player.play_pause(); log("play/pause")
+        elif what == "n":
+            self.player.next(); log("next")
+        elif what == "b":
+            self.player.previous(); log("previous")
+        elif what == "v" and len(fields) > 2:
+            try:
+                steps = int(fields[2])
+            except ValueError:
+                return
+            self.player.nudge_volume(steps)
+            # Report the new level straight back, so the bar tracks the knob.
+            self.push_volume(force=True)
+
+    def send_cover(self, url):
+        fb = cover_framebuffer(url)
+        if fb is None:
+            return
+        self.link.send("#ab")
+        for seq in range(0, len(fb), ART_CHUNK):
+            chunk = fb[seq:seq + ART_CHUNK]
+            self.link.send("#a %d %s" % (seq // ART_CHUNK, chunk.hex()))
+        self.link.send("#ae")
+        log("cover: %d bytes sent" % len(fb))
+
+    def push_volume(self, force=False):
+        vol = self.player.volume()
+        v = 255 if vol is None else vol
+        if force or v != self.last_vol:
+            self.last_vol = v
+            status = self.last[0] if self.last else 0
+            self.link.send("#ns %d %d" % (status, v))
+
+    def poll(self):
+        status, title, artist, art_url = self.player.now_playing()
+        state = (status, title, artist)
+        if state != self.last:
+            self.last = state
+            self.link.send("#ns %d %d" % (status, self.last_vol if self.last_vol is not None else 255))
+            self.link.send("#nt %s" % title[:88])
+            self.link.send("#na %s" % artist[:88])
+            log("%s | %s - %s" % (("stopped", "playing", "paused")[status],
+                                  title or "(nothing)", artist or ""))
+        if art_url != self.last_art_url:
+            self.last_art_url = art_url
+            self.send_cover(art_url)
+        self.push_volume()
+
+    def run(self):
+        period = 1.0 / self.args.rate
+        while True:
+            start = time.time()
+            try:
+                self.poll()
+            except OSError as error:
+                log("puck write failed (%s); reopening" % error)
+                if not self.reopen():
+                    continue
+            try:
+                for line in self.link.lines(max(0.0, period - (time.time() - start))):
+                    self.handle(line)
+            except OSError as error:
+                log("puck read failed (%s); reopening" % error)
+                self.reopen()
+
+
+def cmd_spotify(args):
+    """Bridge the active MPRIS player to the puck: transport and volume in, cover out."""
+    player = Player()
+    link = None
+    while link is None:
+        try:
+            link = open_link(args)
+        except SystemExit as error:
+            if not args.wait_for_puck:
+                raise
+            log("%s - waiting" % error)
+            time.sleep(5.0)
+    log("bridging the active player to the puck (playerctld, host volume)")
+    try:
+        Media(link, player, args).run()
+    except KeyboardInterrupt:
+        log("stopped")
+    finally:
+        link.close()
+    return 0
+
+
 def cmd_reset(args):
     link = open_link(args)
     log("asking the puck to reboot into %s mode" % args.mode)
@@ -877,6 +1125,12 @@ def main():
     gantry.add_argument("--wait-for-puck", action="store_true",
                         help="sit and retry until the puck turns up (for running as a service)")
     gantry.set_defaults(run=cmd_gantry)
+
+    spotify = subparsers.add_parser("spotify", help="control the active player from the puck")
+    spotify.add_argument("--rate", type=float, default=4.0, help="polls per second")
+    spotify.add_argument("--wait-for-puck", action="store_true",
+                         help="sit and retry until the puck turns up (for running as a service)")
+    spotify.set_defaults(run=cmd_spotify)
 
     flash = subparsers.add_parser("flash", help="reflash over USB")
     flash.add_argument("image", nargs="?", default="out/pico2joy-bringup.uf2")

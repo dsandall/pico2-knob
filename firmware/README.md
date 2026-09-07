@@ -203,6 +203,34 @@ the knob jogs the selected axis by the step size from the menu (0.01 / 0.1 / 1 /
 10 mm), and `home all` in the menu sends `#c home`. Each axis shows its position,
 its travel as a bar with the head's place in it, and dashes if it isn't homed.
 
+## Now playing (Spotify, or anything)
+
+`tools/pico2joy.py spotify` turns the puck into a transport for whatever the
+host is playing, and relays the album art back to the screen.
+
+```
+tools/pico2joy.py spotify              # over USB or BLE, whichever the puck is on
+uv run tools/pico2joy.py spotify       # album art needs pillow, fetched by uv
+```
+
+It reads the **active MPRIS player** through `playerctl` (following `playerctld`,
+so it tracks whatever you last touched) rather than Spotify's Web API - no OAuth,
+no app registration, nothing to break when the API changes, and it works against
+the Spotify *web player* in your browser exactly as it works against a desktop
+app or, for that matter, a YouTube tab. Volume is the host's own output level via
+`wpctl` (or `pactl`), because "louder" means the machine the music comes out of.
+
+On the **now-playing screen** (fourth in the `d` cycle) the cover fills the frame
+with a dark footer carrying title, artist and a volume bar. **BTN1/2/3 are
+previous / play-pause / next**, and the **knob is volume**, five percent a detent.
+With no bridge running the screen says so instead of showing a stale track.
+
+The wire format is the same machine channel the gantry uses (`src/media.rs`):
+`#ns`/`#nt`/`#na` carry play state, title and artist; the 128x128 one-bit cover
+goes out as `#ab`, a run of `#a <seq> <hex>` rows, then `#ae`; and the puck sends
+`#m p`/`#m n`/`#m b`/`#m v <steps>` back. One owner per link still holds, so the
+puck drives the gantry or the player, not both at once.
+
 ## Battery
 
 The nice!nano v2 senses the cell through **VDDH**, not a divider pin, so this
