@@ -67,8 +67,9 @@ PUCK_TX = "9f4a0003-1d2b-4c65-9c31-7f9a2b0d5e01"   # puck notifies lines here
 
 # Nordic legacy DFU, which is what the Adafruit bootloader on the nice!nano
 # speaks over the air.
-DFU_CONTROL = "00001531-1212-efde-1523-785feba6"
-DFU_PACKET = "00001532-1212-efde-1523-785feba6"
+DFU_SERVICE = "00001530-1212-efde-1523-785feabcd123"
+DFU_CONTROL = "00001531-1212-efde-1523-785feabcd123"
+DFU_PACKET = "00001532-1212-efde-1523-785feabcd123"
 
 
 def log(message):
@@ -684,7 +685,7 @@ def cmd_ota(args):
     async def run():
         log("scanning for a DFU target")
         device = await BleakScanner.find_device_by_filter(
-            lambda d, ad: DFU_CONTROL[4:8] in [s[4:8] for s in (ad.service_uuids or [])]
+            lambda d, ad: DFU_SERVICE in [s.lower() for s in (ad.service_uuids or [])]
             or (ad.local_name or "").lower().endswith("dfu")
             or (ad.local_name or "") in (args.dfu_name, "DfuTarg"),
             timeout=args.scan)
@@ -698,9 +699,15 @@ def cmd_ota(args):
             await client.start_notify(DFU_CONTROL, lambda _h, data: replies.put_nowait(bytes(data)))
 
             async def expect(opcode):
-                reply = await asyncio.wait_for(replies.get(), timeout=30.0)
-                if len(reply) < 3 or reply[0] != 0x10 or reply[1] != opcode or reply[2] != 0x01:
-                    raise SystemExit("DFU refused at opcode %#x: %s" % (opcode, reply.hex()))
+                """The response to `opcode`. Packet receipts (0x11) arriving in the
+                meantime are flow control, not an answer, and are skipped."""
+                while True:
+                    reply = await asyncio.wait_for(replies.get(), timeout=30.0)
+                    if reply and reply[0] == 0x11:
+                        continue
+                    if len(reply) < 3 or reply[0] != 0x10 or reply[1] != opcode or reply[2] != 0x01:
+                        raise SystemExit("DFU refused at opcode %#x: %s" % (opcode, reply.hex()))
+                    return
 
             # START_DFU, application only.
             await client.write_gatt_char(DFU_CONTROL, bytes([0x01, 0x04]), response=True)
@@ -722,13 +729,26 @@ def cmd_ota(args):
             await client.write_gatt_char(DFU_CONTROL, bytes([0x03]), response=True)
 
             sent = 0
+            sent_bytes = 0
             for offset in range(0, len(firmware), 20):
-                await client.write_gatt_char(DFU_PACKET, firmware[offset:offset + 20],
-                                             response=False)
+                chunk = firmware[offset:offset + 20]
+                await client.write_gatt_char(DFU_PACKET, chunk, response=False)
                 sent += 1
+                sent_bytes += len(chunk)
                 if args.receipts and sent % args.receipts == 0:
-                    await asyncio.wait_for(replies.get(), timeout=30.0)
-                    print("\r  %d%%" % (100 * (offset + 20) // len(firmware)), end="", flush=True)
+                    # Flow control: the receipt says how much the target has
+                    # actually taken, so wait until that covers what was sent
+                    # rather than counting notifications and hoping they line
+                    # up. A receipt that never comes is a lost packet, and a
+                    # timeout is the right answer to that.
+                    while True:
+                        reply = await asyncio.wait_for(replies.get(), timeout=30.0)
+                        if reply and reply[0] == 0x11 and len(reply) >= 5:
+                            if int.from_bytes(reply[1:5], "little") >= sent_bytes:
+                                break
+                        elif reply and reply[0] == 0x10:
+                            raise SystemExit("DFU error mid-image: %s" % reply.hex())
+                    print("\r  %d%%" % (100 * sent_bytes // len(firmware)), end="", flush=True)
             print()
             await expect(0x03)
 
@@ -837,7 +857,7 @@ def main():
     parser.add_argument("--port-glob", default=USB_GLOB, help="where to look (default: %(default)s)")
     parser.add_argument("--address", help="BLE address, if you'd rather not scan")
     parser.add_argument("--scan", type=float, default=8.0, help="BLE scan seconds")
-    parser.add_argument("--dfu-name", default="pico2joyDFU", help="bootloader's advertised name")
+    parser.add_argument("--dfu-name", default="AdaDFU", help="bootloader's advertised name (default: %(default)s)")
     parser.add_argument("--verbose", action="store_true", help="echo the puck's console lines")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
