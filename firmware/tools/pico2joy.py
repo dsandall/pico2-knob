@@ -7,7 +7,9 @@
 
     tools/pico2joy.py scan                    # what can see the puck right now
     tools/pico2joy.py monitor                 # console passthrough
+    tools/pico2joy.py relay                    # gantry + music, following the screen
     tools/pico2joy.py gantry                  # drive a Klipper gantry
+    tools/pico2joy.py spotify                 # transport + album art for the player
     tools/pico2joy.py flash out/…uf2          # reflash over USB, no reset button
     tools/pico2joy.py ota out/…-dfu.zip       # reflash over BLE, no cable at all
 
@@ -504,61 +506,6 @@ class Gantry:
         except (urllib.error.HTTPError, OSError) as error:
             log("%s failed: %s" % (name, error))
 
-    def reopen(self):
-        """Get the puck back after it re-enumerated. Returns whether it worked."""
-        try:
-            self.link.close()
-        except OSError:
-            pass
-        for _ in range(20):
-            time.sleep(1.0)
-            try:
-                self.link = open_link(self.args)
-                self.limits_sent = 0.0
-                return True
-            except SystemExit:
-                continue
-        log("puck did not come back")
-        return False
-
-    def run(self):
-        period = 1.0 / self.args.rate
-        next_push = 0.0
-        polled = None
-        while True:
-            now = time.time()
-            if now >= next_push:
-                next_push = now + period
-                try:
-                    self.poll()
-                    if not polled:
-                        log("printer: %s, homed %r" % (self.printer.base, self.homed or "nothing"))
-                    polled = True
-                except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-                        ValueError, KeyError) as error:
-                    # Say it once, then stay quiet until it works again.
-                    if polled is not False:
-                        log("moonraker: %s" % error)
-                        if isinstance(error, urllib.error.HTTPError) and error.code == 401:
-                            log("  -> not a trusted client. Use --api-key, or --tunnel user@host,"
-                                " or add this host to moonraker.conf's trusted_clients.")
-                    polled = False
-                    time.sleep(1.0)
-                    continue
-                try:
-                    self.push(now)
-                except OSError as error:
-                    # A USB hiccup is not a reason to stop driving a printer.
-                    log("puck write failed (%s); reopening" % error)
-                    if not self.reopen():
-                        continue
-            try:
-                for line in self.link.lines(max(0.01, next_push - time.time())):
-                    self.handle(line)
-            except OSError as error:
-                log("puck read failed (%s); reopening" % error)
-                self.reopen()
-            self.flush_jogs(time.time())
 
 
 # --------------------------------------------------------------------------
@@ -811,25 +758,188 @@ def cmd_monitor(args):
         link.close()
 
 
-def cmd_gantry(args):
+def run_relay(args, only=None):
+    """Own the puck's link and serve several apps over it, one at a time.
+
+    The machine channel is already multiplexed by message type - `#s`/`#j` for
+    the gantry, `#ns`/`#a`/`#m` for the player - and the puck already demuxes on
+    it, so the only thing that made the apps mutually exclusive was running them
+    as separate programs, each grabbing the one link. This is the single owner:
+    it holds the link, runs both apps, and streams *only* the one whose view is
+    on screen (the puck announces it with `#view <name>`). `only` pins one app
+    and ignores the announcement, which is what the `gantry` and `spotify`
+    wrappers use.
+
+    One owner per link still holds - this *is* the owner - but now the puck can
+    switch between jogging and music by turning the knob, not by restarting a
+    program.
+    """
+    need_gantry = only in (None, "gantry")
+    need_media = only in (None, "music")
+
     tunnel = None
-    base = args.moonraker
-    if args.tunnel:
-        tunnel, base = start_tunnel(args.tunnel)
-    # Wait rather than exit: as a service this starts before anyone has plugged
-    # the puck in, and "no puck yet" is not a failure worth restarting over.
-    link = None
-    while link is None:
+    printer = None
+    if need_gantry:
+        base = args.moonraker
+        if getattr(args, "tunnel", None):
+            tunnel, base = start_tunnel(args.tunnel)
+        printer = Moonraker(base, args.api_key)
+    player = Player() if need_media else None
+
+    # Wait rather than exit: as a service this may start before the puck is
+    # plugged in, and "no puck yet" is not a failure worth restarting over.
+    def connect():
+        while True:
+            try:
+                return open_link(args)
+            except SystemExit as error:
+                if not getattr(args, "wait_for_puck", False):
+                    raise
+                log("%s - waiting" % error)
+                time.sleep(5.0)
+
+    link = connect()
+    gantry = Gantry(link, printer, args) if need_gantry else None
+    media = Media(link, player, args) if need_media else None
+
+    by_view = {}
+    owner = {}
+    if gantry:
+        by_view["gantry"] = gantry
+        owner["j"] = owner["c"] = gantry
+    if media:
+        by_view["music"] = media
+        owner["m"] = media
+
+    def set_link(new):
+        nonlocal link
+        link = new
+        if gantry:
+            gantry.link = new
+        if media:
+            media.link = new
+
+    def reopen():
         try:
-            link = open_link(args)
-        except SystemExit as error:
-            if not args.wait_for_puck:
-                raise
-            log("%s - waiting" % error)
-            time.sleep(5.0)
-    log("moonraker at %s" % base)
+            link.close()
+        except OSError:
+            pass
+        for _ in range(20):
+            time.sleep(1.0)
+            try:
+                set_link(open_link(args))
+                if state["active"]:
+                    activate(state["active"])
+                elif not only:
+                    link.send("#?")
+                return True
+            except SystemExit:
+                continue
+        log("puck did not come back")
+        return False
+
+    def activate(app):
+        # Whatever changed while its view was off screen, resend in full.
+        if app is gantry:
+            gantry.limits_sent = 0.0
+            log("relay: gantry")
+        elif app is media:
+            media.last = media.last_art_url = None
+            log("relay: music")
+
+    # A dict so the nested handlers can rebind it without `nonlocal` gymnastics.
+    state = {"active": by_view.get(only) if only else None, "moonraker_ok": None}
+
+    def route(line):
+        if not line.startswith("#"):
+            if getattr(args, "verbose", False) and line:
+                log("puck: %s" % line)
+            return
+        fields = line[1:].split()
+        if not fields:
+            return
+        kind = fields[0]
+        if kind == "view":
+            if only:
+                return                      # pinned: the puck's view doesn't steer us
+            name = fields[1] if len(fields) > 1 else ""
+            new = by_view.get(name)
+            if new is not state["active"]:
+                state["active"] = new
+                if new:
+                    activate(new)
+                else:
+                    log("relay: %s (nothing to stream)" % (name or "?"))
+            return
+        app = owner.get(kind)
+        if app is not None:
+            app.handle(line)
+        elif kind == "v":
+            pass                            # identify reply, already have the view
+        elif getattr(args, "verbose", False):
+            log("puck: unknown %s" % line)
+
+    if only:
+        log("relay: %s, pinned to %s" % (link.name, only))
+        activate(state["active"])
+    else:
+        log("relay: %s, following the puck's view" % link.name)
+    if printer:
+        log("moonraker at %s" % printer.base)
+    if not only:
+        try:
+            link.send("#?")                 # which view is up right now?
+        except OSError:
+            pass
+
+    g_period = 1.0 / getattr(args, "rate", 8.0)
+    m_period = 0.25
+    next_g = next_m = 0.0
+
     try:
-        Gantry(link, Moonraker(base, args.api_key), args).run()
+        while True:
+            now = time.time()
+            active = state["active"]
+            if active is gantry and now >= next_g:
+                next_g = now + g_period
+                try:
+                    gantry.poll()
+                    if state["moonraker_ok"] is not True:
+                        log("printer: %s, homed %r" % (printer.base, gantry.homed or "nothing"))
+                    state["moonraker_ok"] = True
+                except (urllib.error.URLError, urllib.error.HTTPError, OSError,
+                        ValueError, KeyError) as error:
+                    if state["moonraker_ok"] is not False:
+                        log("moonraker: %s" % error)
+                        if isinstance(error, urllib.error.HTTPError) and error.code == 401:
+                            log("  -> not a trusted client. Use --api-key, or --tunnel"
+                                " user@host, or add this host to trusted_clients.")
+                    state["moonraker_ok"] = False
+                if state["moonraker_ok"]:
+                    try:
+                        gantry.push(now)
+                    except OSError as error:
+                        log("puck write failed (%s); reopening" % error)
+                        if not reopen():
+                            continue
+            elif active is media and now >= next_m:
+                next_m = now + m_period
+                try:
+                    media.poll()
+                except OSError as error:
+                    log("puck write failed (%s); reopening" % error)
+                    if not reopen():
+                        continue
+
+            try:
+                for line in link.lines(0.05):
+                    route(line)
+            except OSError as error:
+                log("puck read failed (%s); reopening" % error)
+                reopen()
+
+            if gantry:
+                gantry.flush_jogs(time.time())
     except KeyboardInterrupt:
         log("stopped")
     finally:
@@ -837,6 +947,16 @@ def cmd_gantry(args):
         if tunnel:
             tunnel.terminate()
     return 0
+
+
+def cmd_relay(args):
+    """Own the link and follow the puck's view between the gantry and the player."""
+    return run_relay(args, only=None)
+
+
+def cmd_gantry(args):
+    """Drive the gantry only: a relay pinned to the gantry app."""
+    return run_relay(args, only="gantry")
 
 
 # --------------------------------------------------------------------------
@@ -977,21 +1097,6 @@ class Media:
         self.last_vol = None
         self.last_art_url = None
 
-    def reopen(self):
-        try:
-            self.link.close()
-        except OSError:
-            pass
-        for _ in range(20):
-            time.sleep(1.0)
-            try:
-                self.link = open_link(self.args)
-                self.last = self.last_vol = self.last_art_url = None
-                return True
-            except SystemExit:
-                continue
-        log("puck did not come back")
-        return False
 
     def handle(self, line):
         fields = line.split()
@@ -1053,44 +1158,11 @@ class Media:
             self.last_art_url = art_url
             self.send_cover(art_url)
 
-    def run(self):
-        period = 1.0 / self.args.rate
-        while True:
-            start = time.time()
-            try:
-                self.poll()
-            except OSError as error:
-                log("puck write failed (%s); reopening" % error)
-                if not self.reopen():
-                    continue
-            try:
-                for line in self.link.lines(max(0.0, period - (time.time() - start))):
-                    self.handle(line)
-            except OSError as error:
-                log("puck read failed (%s); reopening" % error)
-                self.reopen()
 
 
 def cmd_spotify(args):
-    """Bridge the active MPRIS player to the puck: transport and volume in, cover out."""
-    player = Player()
-    link = None
-    while link is None:
-        try:
-            link = open_link(args)
-        except SystemExit as error:
-            if not args.wait_for_puck:
-                raise
-            log("%s - waiting" % error)
-            time.sleep(5.0)
-    log("bridging the active player to the puck (playerctld, host volume)")
-    try:
-        Media(link, player, args).run()
-    except KeyboardInterrupt:
-        log("stopped")
-    finally:
-        link.close()
-    return 0
+    """Bridge the media player only: a relay pinned to the music app."""
+    return run_relay(args, only="music")
 
 
 def cmd_reset(args):
@@ -1118,16 +1190,27 @@ def main():
     subparsers.add_parser("scan", help="what can see the puck right now").set_defaults(run=cmd_scan)
     subparsers.add_parser("monitor", help="print what the puck says").set_defaults(run=cmd_monitor)
 
+    def add_gantry_opts(sub):
+        sub.add_argument("--moonraker", default="http://192.168.1.11:7125",
+                         help="Moonraker base URL (default: %(default)s)")
+        sub.add_argument("--api-key", help="Moonraker API key, if this host isn't trusted")
+        sub.add_argument("--tunnel", metavar="USER@HOST",
+                         help="forward Moonraker over ssh so requests come from localhost")
+        sub.add_argument("--jog-interval", type=float, default=0.12, metavar="SECONDS",
+                         help="how long to gather jogs before sending them as one move"
+                              " (default: %(default)s)")
+
+    relay = subparsers.add_parser(
+        "relay", help="own the link and follow the puck's view (gantry + music)")
+    add_gantry_opts(relay)
+    relay.add_argument("--rate", type=float, default=8.0, help="gantry state updates per second")
+    relay.add_argument("--wait-for-puck", action="store_true",
+                       help="sit and retry until the puck turns up (for running as a service)")
+    relay.set_defaults(run=cmd_relay)
+
     gantry = subparsers.add_parser("gantry", help="drive a Klipper gantry with the knob")
-    gantry.add_argument("--moonraker", default="http://192.168.1.11:7125",
-                        help="Moonraker base URL (default: %(default)s)")
-    gantry.add_argument("--api-key", help="Moonraker API key, if this host isn't trusted")
-    gantry.add_argument("--tunnel", metavar="USER@HOST",
-                        help="forward Moonraker over ssh so requests come from localhost")
+    add_gantry_opts(gantry)
     gantry.add_argument("--rate", type=float, default=8.0, help="state updates per second")
-    gantry.add_argument("--jog-interval", type=float, default=0.12, metavar="SECONDS",
-                        help="how long to gather jogs before sending them as one move"
-                             " (default: %(default)s)")
     gantry.add_argument("--wait-for-puck", action="store_true",
                         help="sit and retry until the puck turns up (for running as a service)")
     gantry.set_defaults(run=cmd_gantry)

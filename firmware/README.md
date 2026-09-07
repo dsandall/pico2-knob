@@ -130,10 +130,18 @@ below.
 `tools/pico2joy.py` is the one host-side program: it finds the puck on USB or
 BLE and speaks the same line protocol either way.
 
+It serves several apps over that one link. `relay` owns the link and follows
+the puck's screen - jog the gantry, turn the knob to the now-playing view and
+the same knob is volume - because the machine channel is multiplexed by message
+type and the puck announces its view with `#view`. `gantry` and `spotify` are
+that same relay pinned to one app, for a host that only has the one job (the
+printer has no browser; a workstation may have no printer).
+
 ```
 tools/pico2joy.py scan            # what can see the puck right now
 tools/pico2joy.py monitor         # console passthrough
-tools/pico2joy.py gantry          # drive a Klipper gantry with the knob
+tools/pico2joy.py relay           # gantry + music, following the puck's view
+tools/pico2joy.py gantry          # just the gantry (relay pinned to one app)
 tools/pico2joy.py flash out/pico2joy-bringup.uf2   # reflash, no reset button
 tools/pico2joy.py reset uf2|serial|ota             # into a bootloader mode
 ```
@@ -151,7 +159,7 @@ socket and no discovery. The one hard rule is that a serial port and a BLE
 connection each have exactly one owner, so one copy of it owns the puck at a
 time.
 
-`gantry` is the relay:
+Run it on the printer, where Moonraker is localhost and trusted:
 
 ```
 scp tools/pico2joy.py sovol@spi-xi:~/pico2joy/     # plug the puck in there
@@ -159,7 +167,7 @@ ssh sovol@spi-xi 'python3 ~/pico2joy/pico2joy.py gantry'   # localhost Moonraker
 ```
 
 Moonraker only trusts requests from its `trusted_clients`, which is why the
-relay is happiest on the printer. To run it from a workstation instead, pass
+gantry bridge is happiest on the printer. To run it from a workstation instead, pass
 `--api-key`, add that host to `trusted_clients`, or let the tool tunnel the port
 so the request arrives from localhost:
 

@@ -1030,6 +1030,9 @@ async fn main(_spawner: embassy_executor::Spawner) {
                 let view = (VIEW.load(Ordering::Relaxed) + 1) % VIEWS;
                 VIEW.store(view, Ordering::Relaxed);
                 logln!("view: {}", view_label());
+                // Tell the relay which app is on screen, so it streams only that
+                // one - see the machine channel in tools/pico2joy.py.
+                proto!("#view {}", view_label());
                 force = true;
             }
 
@@ -1569,6 +1572,12 @@ fn console_key(byte: u8) {
 fn machine_line(line: &str) {
     let mut fields = line.split_ascii_whitespace();
     match fields.next() {
+        // Identify: the relay asks on connect, and uses the view to pick which
+        // app to stream. `#v 1` stays for older hosts that only want the ack.
+        Some("?") | Some("#?") => {
+            proto!("#v 1");
+            proto!("#view {}", view_label());
+        }
         // Reboot into a bootloader mode by name, so a host can start an update
         // without anyone touching the reset button.
         Some("r") | Some("#r") => {
