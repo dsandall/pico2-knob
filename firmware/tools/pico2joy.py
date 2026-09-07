@@ -7,9 +7,10 @@
 
     tools/pico2joy.py scan                    # what can see the puck right now
     tools/pico2joy.py monitor                 # console passthrough
-    tools/pico2joy.py relay                    # gantry + music, following the screen
+    tools/pico2joy.py relay                   # every app, following the screen
     tools/pico2joy.py gantry                  # drive a Klipper gantry
     tools/pico2joy.py spotify                 # transport + album art for the player
+    tools/pico2joy.py quota                   # Claude/Codex rate-limit windows
     tools/pico2joy.py flash out/…uf2          # reflash over USB, no reset button
     tools/pico2joy.py ota out/…-dfu.zip       # reflash over BLE, no cable at all
 
@@ -103,9 +104,20 @@ class UsbLink:
                           [iflag, oflag, cflag, lflag, termios.B115200, termios.B115200, cc])
         self.buffer = b""
 
+    #: A cable either works or raises; there is nothing for it to heal from.
+    self_healing = False
+    #: Counts connections, as [`BleLink.generation`] does. A cable that is open
+    #: has connected exactly once, so this never moves - `reopen` builds a whole
+    #: new link, and the counter goes with it.
+    generation = 1
+
     @property
     def name(self):
         return self.path
+
+    @property
+    def connected(self):
+        return True
 
     def close(self):
         try:
@@ -148,74 +160,174 @@ class UsbLink:
         return out
 
 
-class BleLink:
-    """The same lines over GATT.
+def forget_ble_device(address):
+    """Drop BlueZ's cached record of `address`, GATT database and all.
 
-    bleak is asyncio and everything above here is a plain loop, so the event
-    loop lives in a thread of its own and the two sides meet at two queues.
+    BlueZ caches a service list per address for LE devices it has seen, bonded
+    or not. The puck keeps *one* address across its bootloader and its
+    application - which is the right call for flashing, and a trap here: connect
+    while BlueZ still holds the bootloader's `AdaDFU` services and the puck
+    service simply isn't there, with no error to say why. Removing the device
+    makes the next connection rediscover.
+
+    Done through `busctl` rather than a D-Bus binding: it ships with systemd, it
+    needs no dependency, and this is a rare repair rather than a hot path. Any
+    failure is ignored - the caller is already handling "couldn't find it".
+    """
+    node = "dev_" + address.upper().replace(":", "_")
+    for adapter in sorted(glob.glob("/sys/class/bluetooth/hci*")):
+        hci = os.path.basename(adapter)
+        try:
+            subprocess.run(
+                ["busctl", "call", "--system", "org.bluez", "/org/bluez/%s" % hci,
+                 "org.bluez.Adapter1", "RemoveDevice", "o",
+                 "/org/bluez/%s/%s" % (hci, node)],
+                capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+class BleLink:
+    """The same lines over GATT, on a link that puts itself back together.
+
+    bleak is asyncio and everything above here is a plain loop, so the event loop
+    lives in a thread of its own and the two sides meet at queues.
+
+    The thread's job is not "connect" but "stay connected": it scans, connects,
+    serves until the link drops, and starts over - so a puck that walks out of
+    range, or a host that suspends, costs a gap rather than the session. Nothing
+    above needs to know. `generation` counts the connections, which is how the
+    relay notices it is talking to a puck that has forgotten everything it was
+    told and needs it all again.
     """
 
     kind = "ble"
+    #: The relay's `reopen` is for links that need rebuilding from outside. This
+    #: one heals itself, so tearing it down and scanning again would only add a
+    #: minute to something already in progress.
+    self_healing = True
 
     def __init__(self, address=None, name=BLE_NAME, timeout=20.0):
         import asyncio
         from bleak import BleakClient, BleakScanner
 
-        self._asyncio = asyncio
         self.address = address
         self.want_name = name
-        self.rx = queue.Queue()
-        self.outgoing = queue.Queue()
-        self.ready = threading.Event()
+        # Bounded, both of them. A queue that grows without limit while the link
+        # is down is a queue that delivers a minute of stale jogs the moment it
+        # comes back.
+        self.rx = queue.Queue(maxsize=4096)
+        self.outgoing = queue.Queue(maxsize=256)
+        self.up = threading.Event()
+        self.first = threading.Event()
+        self.generation = 0
         self.error = None
         self.buffer = b""
         self.name = address or name
+        self._stop = threading.Event()
+
+        def on_notify(_handle, data):
+            self.buffer += bytes(data)
+            while b"\n" in self.buffer:
+                line, self.buffer = self.buffer.split(b"\n", 1)
+                try:
+                    self.rx.put_nowait(line.decode("utf-8", "replace").strip())
+                except queue.Full:
+                    pass
+            if len(self.buffer) > 4096:
+                self.buffer = b""
+
+        async def find():
+            if self.address:
+                return self.address
+            device = await BleakScanner.find_device_by_filter(
+                lambda d, ad: (ad.local_name or d.name or "") == self.want_name,
+                timeout=timeout)
+            if device is None:
+                raise RuntimeError("no BLE puck advertising as %r" % self.want_name)
+            return device.address
+
+        async def serve(client, target):
+            # A connection that came up against a stale service list looks
+            # exactly like a working one until the first write fails, so check
+            # for the channel before announcing the link.
+            if client.services.get_characteristic(PUCK_TX) is None:
+                forget_ble_device(target)
+                raise RuntimeError("no puck service at %s - dropped the BlueZ "
+                                   "cache, retrying" % target)
+            self.buffer = b""
+            await client.start_notify(PUCK_TX, on_notify)
+            self.name = target
+            self.generation += 1
+            self.up.set()
+            self.first.set()
+            log("ble: connected to %s" % target)
+            while not self._stop.is_set() and client.is_connected:
+                try:
+                    line = self.outgoing.get_nowait()
+                except queue.Empty:
+                    # Polled rather than awaited: the producer is a plain thread
+                    # and 20 ms is under the puck's frame time either way.
+                    await asyncio.sleep(0.02)
+                    continue
+                await client.write_gatt_char(PUCK_RX, (line + "\n").encode(),
+                                             response=False)
 
         async def worker():
-            target = self.address
-            if target is None:
-                device = await BleakScanner.find_device_by_filter(
-                    lambda d, ad: (ad.local_name or d.name or "") == self.want_name, timeout=timeout)
-                if device is None:
-                    self.error = "no BLE puck advertising as %r" % self.want_name
-                    self.ready.set()
-                    return
-                target = device.address
-            self.name = target
-            try:
-                async with BleakClient(target, timeout=timeout) as client:
-                    def on_notify(_handle, data):
-                        self.buffer += bytes(data)
-                        while b"\n" in self.buffer:
-                            line, self.buffer = self.buffer.split(b"\n", 1)
-                            self.rx.put(line.decode("utf-8", "replace").strip())
-                    await client.start_notify(PUCK_TX, on_notify)
-                    self.ready.set()
-                    while not self._stop.is_set():
+            backoff = 1.0
+            while not self._stop.is_set():
+                target = None
+                try:
+                    target = await find()
+                    async with BleakClient(target, timeout=timeout) as client:
+                        await serve(client, target)
+                except Exception as failure:      # noqa: BLE001 - reported below
+                    self.error = str(failure)
+                    if self.first.is_set():
+                        log("ble: %s" % failure)
+                finally:
+                    if self.up.is_set():
+                        log("ble: link down")
+                    self.up.clear()
+                    # Whatever was queued for a puck that isn't listening is
+                    # stale by the time one is.
+                    while True:
                         try:
-                            line = self.outgoing.get_nowait()
+                            self.outgoing.get_nowait()
                         except queue.Empty:
-                            await asyncio.sleep(0.02)
-                            continue
-                        await client.write_gatt_char(PUCK_RX, (line + "\n").encode(),
-                                                     response=False)
-            except Exception as failure:          # noqa: BLE001 - reported, not swallowed
-                self.error = str(failure)
-                self.ready.set()
+                            break
+                    self.first.set()
+                if self._stop.is_set():
+                    break
+                await asyncio.sleep(backoff)
+                backoff = 1.0 if self.up.is_set() else min(backoff * 2, 30.0)
 
-        self._stop = threading.Event()
         self._thread = threading.Thread(target=lambda: asyncio.run(worker()), daemon=True)
         self._thread.start()
-        if not self.ready.wait(timeout + 5):
+        # Wait for the first attempt to settle, so a puck that simply isn't there
+        # is reported as such rather than becoming a relay that logs nothing.
+        # After this the thread keeps the link up on its own.
+        if not self.first.wait(timeout + 15):
+            self._stop.set()
             raise RuntimeError("BLE connect timed out")
-        if self.error:
-            raise RuntimeError(self.error)
+        if not self.up.is_set():
+            self._stop.set()
+            raise RuntimeError(self.error or "could not connect")
+
+    @property
+    def connected(self):
+        return self.up.is_set()
 
     def close(self):
         self._stop.set()
 
     def send(self, line):
-        self.outgoing.put(line)
+        if not self.up.is_set():
+            return                          # dropped on purpose: see `outgoing`
+        try:
+            self.outgoing.put_nowait(line)
+        except queue.Full:
+            pass
 
     def lines(self, timeout):
         out = []
@@ -776,6 +888,7 @@ def run_relay(args, only=None):
     """
     need_gantry = only in (None, "gantry")
     need_media = only in (None, "music")
+    need_quota = only in (None, "quota")
 
     tunnel = None
     printer = None
@@ -785,6 +898,7 @@ def run_relay(args, only=None):
             tunnel, base = start_tunnel(args.tunnel)
         printer = Moonraker(base, args.api_key)
     player = Player() if need_media else None
+    subs = subscriptions(args) if need_quota else []
 
     # Wait rather than exit: as a service this may start before the puck is
     # plugged in, and "no puck yet" is not a failure worth restarting over.
@@ -801,6 +915,7 @@ def run_relay(args, only=None):
     link = connect()
     gantry = Gantry(link, printer, args) if need_gantry else None
     media = Media(link, player, args) if need_media else None
+    quota = Quota(link, subs, args) if need_quota else None
 
     by_view = {}
     owner = {}
@@ -810,6 +925,9 @@ def run_relay(args, only=None):
     if media:
         by_view["music"] = media
         owner["m"] = media
+    if quota:
+        by_view["quota"] = quota
+        owner["q"] = quota
 
     def set_link(new):
         nonlocal link
@@ -818,8 +936,21 @@ def run_relay(args, only=None):
             gantry.link = new
         if media:
             media.link = new
+        if quota:
+            quota.link = new
+
+    def resync():
+        """Tell a puck everything again. What a fresh connection is owed."""
+        if state["active"]:
+            activate(state["active"])
+        if not only:
+            link.send("#?")              # which view is up on this puck now?
 
     def reopen():
+        # A self-healing link is already trying; tearing it down would only
+        # restart a scan that is in progress. Let it be.
+        if getattr(link, "self_healing", False):
+            return True
         try:
             link.close()
         except OSError:
@@ -828,10 +959,7 @@ def run_relay(args, only=None):
             time.sleep(1.0)
             try:
                 set_link(open_link(args))
-                if state["active"]:
-                    activate(state["active"])
-                elif not only:
-                    link.send("#?")
+                resync()
                 return True
             except SystemExit:
                 continue
@@ -846,6 +974,12 @@ def run_relay(args, only=None):
         elif app is media:
             media.last = media.last_art_url = None
             log("relay: music")
+        elif app is quota:
+            quota.reset()
+            # Turning to this screen is itself the question, so ask the vendors
+            # again rather than showing whatever the last poll happened to see.
+            quota.refresh()
+            log("relay: quota")
 
     # A dict so the nested handlers can rebind it without `nonlocal` gymnastics.
     state = {"active": by_view.get(only) if only else None, "moonraker_ok": None}
@@ -892,13 +1026,30 @@ def run_relay(args, only=None):
         except OSError:
             pass
 
+    # Connections seen so far. A link that dropped and came back is talking to a
+    # puck that was told everything before the gap and remembers none of it, so
+    # every reconnection - not just the first - gets the full state again.
+    seen = link.generation
     g_period = 1.0 / getattr(args, "rate", 8.0)
     m_period = 0.25
-    next_g = next_m = 0.0
+    # A second is plenty: this only pushes the numbers the worker thread already
+    # has, and the puck ticks the countdown itself between them.
+    q_period = 1.0
+    next_g = next_m = next_q = 0.0
 
     try:
         while True:
             now = time.time()
+            if link.generation != seen:
+                seen = link.generation
+                log("relay: link back, resending")
+                resync()
+            # A link that is down takes nothing: `send` drops it, and pushing
+            # state at a puck that isn't there only burns the poll.
+            if not link.connected:
+                for line in link.lines(0.25):
+                    route(line)
+                continue
             active = state["active"]
             if active is gantry and now >= next_g:
                 next_g = now + g_period
@@ -926,6 +1077,14 @@ def run_relay(args, only=None):
                 next_m = now + m_period
                 try:
                     media.poll()
+                except OSError as error:
+                    log("puck write failed (%s); reopening" % error)
+                    if not reopen():
+                        continue
+            elif active is quota and now >= next_q:
+                next_q = now + q_period
+                try:
+                    quota.poll()
                 except OSError as error:
                     log("puck write failed (%s); reopening" % error)
                     if not reopen():
@@ -1165,6 +1324,606 @@ def cmd_spotify(args):
     return run_relay(args, only="music")
 
 
+# --------------------------------------------------------------------------
+# the subscription quotas (Claude and Codex rate-limit windows)
+# --------------------------------------------------------------------------
+
+# Both vendors already answer "how much of your plan have you spent" to the
+# credentials their own CLI leaves on disk, so this asks them the same way their
+# CLIs do and relays the answer. Nothing is scraped from transcripts and nothing
+# is counted here: a token tally computed locally would be a second, wronger copy
+# of a number the vendor is authoritative for - the same reason the gantry screen
+# waits for Klipper rather than integrating its own jogs.
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
+
+KIND_CLAUDE, KIND_CODEX = 0, 1
+# The puck's states, from src/quota.rs. Q_WAIT is what a slot reads as between
+# connecting and the first answer coming back - "asking", not "broken".
+Q_OK, Q_AUTH, Q_ERROR, Q_WAIT = 0, 1, 2, 3
+
+# Claude names its windows rather than measuring them, so their lengths are the
+# only two constants here the vendor didn't hand us. Codex reports its own.
+CLAUDE_FIVE_HOUR = 5 * 3600
+CLAUDE_SEVEN_DAY = 7 * 86400
+
+# What `String<14>` on the puck can hold (see src/quota.rs).
+LABEL_CHARS = 14
+
+# How often to ask, by default. These endpoints rate-limit - a 429 is easy to
+# earn, and it takes a while to clear - and a window that moves over hours does
+# not want asking every minute. Five minutes of staleness costs nothing when
+# holding a button re-checks on demand.
+REFRESH_DEFAULT = 300.0
+# The longest the backoff may stretch a poll. Holding a button still jumps the
+# queue, so this only bounds how long an unattended screen stays stale.
+BACKOFF_CAP = 900.0
+
+
+def count_sessions(pattern, config_dir, env_var):
+    """How many of that CLI's sessions are running, for this config directory.
+
+    Neither vendor reports this, so it is counted where the answer actually
+    exists: the machine the account is logged in on. Top-level processes only -
+    a session spawns helpers with the same name, so counting every `claude` in
+    `ps` says nine when three windows are open. A process is a session when its
+    parent isn't one of the same kind.
+
+    Returns None rather than 0 when it can't tell, so "no sessions" and "no way
+    to look" stay different on screen.
+    """
+    try:
+        out = subprocess.run(["ps", "-eo", "pid,ppid,comm", "--no-headers"],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode != 0:
+            return None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    procs = {}
+    for line in out.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            procs[int(parts[0])] = (int(parts[1]), parts[2].strip())
+    same = {pid for pid, (_, comm) in procs.items() if comm == pattern}
+
+    wanted = os.path.abspath(os.path.expanduser(config_dir))
+    running = 0
+    for pid in same:
+        if procs[pid][0] in same:
+            continue                    # a helper of another session, not one
+        # Which account it belongs to: whatever config directory it was pointed
+        # at, or the vendor default. Unreadable (a different user's process)
+        # counts as the default rather than being dropped.
+        try:
+            with open("/proc/%d/environ" % pid) as handle:
+                env = dict(item.split("=", 1)
+                           for item in handle.read().split("\0") if "=" in item)
+        except OSError:
+            env = {}
+        theirs = env.get(env_var) or ("~/.claude" if env_var == "CLAUDE_CONFIG_DIR"
+                                      else "~/.codex")
+        if os.path.abspath(os.path.expanduser(theirs)) == wanted:
+            running += 1
+    return running
+
+
+class QuotaError(Exception):
+    """A reading that failed, carrying which of the puck's states it maps to.
+
+    `keep` marks the failures that say nothing about the account - a 429 from the
+    usage endpoint, a machine that is briefly unreachable - where the honest move
+    is to hold the last reading and ask again later rather than to blank a screen
+    that was right a minute ago.
+    """
+
+    def __init__(self, state, message, keep=False, retry_after=0):
+        Exception.__init__(self, message)
+        self.state = state
+        self.keep = keep
+        self.retry_after = retry_after
+
+
+def get_json(url, headers, timeout=8.0):
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        # 401/403 is the one failure the user can act on, and the one worth its
+        # own word on a 128-pixel screen. 429 is the usage endpoint itself being
+        # rate-limited, which is nothing to do with the plan behind it.
+        state = Q_AUTH if error.code in (401, 403) else Q_ERROR
+        try:
+            after = int(error.headers.get("Retry-After") or 0)
+        except (AttributeError, ValueError):
+            after = 0
+        raise QuotaError(state, "HTTP %d" % error.code, keep=error.code == 429,
+                         retry_after=after)
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        raise QuotaError(Q_ERROR, str(error), keep=True)
+
+
+def read_json(path):
+    try:
+        with open(path) as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        raise QuotaError(Q_AUTH, "no credentials at %s" % path)
+    except (OSError, ValueError) as error:
+        raise QuotaError(Q_ERROR, str(error))
+
+
+def seconds_until(when):
+    """Seconds from now to an ISO-8601 instant, or -1 if there isn't one.
+
+    -1 rather than None because it goes straight onto the wire, where every
+    field is an integer and "didn't say" has to be one too.
+    """
+    if not when:
+        return -1
+    import datetime
+    text = when.replace("Z", "+00:00")           # 3.9's parser won't take a Z
+    try:
+        moment = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return -1
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime.timezone.utc)
+    return max(0, int(moment.timestamp() - time.time()))
+
+
+def percent(value):
+    """A utilisation figure as 0-100, or 255 for "the vendor didn't say"."""
+    if value is None:
+        return 255
+    try:
+        return max(0, min(100, int(round(float(value)))))
+    except (TypeError, ValueError):
+        return 255
+
+
+def short_label(text, fallback):
+    """A name that fits the puck's row: printable ASCII, no spaces, clipped.
+
+    Returns `fallback` (which may be None) when there's nothing left to use, so
+    callers can chain the sources they'd rather have first.
+    """
+    text = (text or "").strip()
+    if "@" in text:                              # an email is its local part
+        text = text.split("@")[0]
+    text = "".join(c for c in text if 33 <= ord(c) < 127).lstrip(".")
+    return text[:LABEL_CHARS] if text else fallback
+
+
+def span(seconds):
+    """A window length in its coarsest unit - "5h", "7d" - as the puck shows it."""
+    if seconds is None or seconds < 0:
+        return "?"
+    if seconds >= 86400:
+        return "%dd" % (seconds // 86400)
+    if seconds >= 3600:
+        return "%dh" % (seconds // 3600)
+    return "%dm" % (seconds // 60)
+
+
+def run_remote(host, kind, path):
+    """Take one reading on `host` by shipping *this file* there over ssh.
+
+    `ssh host python3 - probe claude ~/.claude < pico2joy.py` - the script
+    arrives on stdin, runs, prints one JSON line and is gone. Nothing is
+    installed on the far end and nothing is left behind, which is the same
+    bargain the rest of this tool makes (stdlib only, no venv).
+
+    The token stays where it belongs. The alternative - `cat` the credentials
+    back here and make the HTTPS call locally - would pull a live OAuth token
+    across the network for no reason; the far machine can make its own request
+    and send back six numbers.
+    """
+    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+            host, "python3", "-", "probe", kind, path]
+    try:
+        with open(os.path.abspath(__file__)) as handle:
+            source = handle.read()
+        out = subprocess.run(argv, input=source, capture_output=True,
+                             text=True, timeout=40)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise QuotaError(Q_ERROR, "ssh %s: %s" % (host, error))
+    if out.returncode != 0:
+        detail = (out.stderr or "").strip().splitlines()
+        raise QuotaError(Q_ERROR, "ssh %s: %s" % (host, detail[-1] if detail else
+                                                  "exit %d" % out.returncode))
+    try:
+        reading = json.loads(out.stdout.strip().splitlines()[-1])
+    except (IndexError, ValueError):
+        raise QuotaError(Q_ERROR, "ssh %s: unreadable reply" % host)
+    if reading.get("error"):
+        raise QuotaError(reading.get("state", Q_ERROR), reading["error"])
+    # JSON has no tuples, and the wire format is positional.
+    for key in ("five", "week", "names"):
+        reading[key] = tuple(reading[key])
+    return reading
+
+
+class ClaudeSub:
+    """One Claude subscription, read from a Claude Code config directory.
+
+    Read-only, deliberately. The access token in there is refreshed by Claude
+    Code itself; using the refresh token here could rotate it out from under the
+    running CLI and log the user out of their own editor to draw a bar on a knob.
+    So an expired token reports `auth` and waits for Claude Code to renew it.
+    """
+
+    kind = KIND_CLAUDE
+
+    def __init__(self, path, label=None, host=None):
+        # A remote path is the far machine's to expand, so leave it alone.
+        self.host = host
+        self.path = path
+        self.dir = path if host else os.path.abspath(os.path.expanduser(path))
+        self.forced_label = label
+        self.label = label or short_label(os.path.basename(self.dir.rstrip("/")),
+                                          host.split("@")[-1].split(".")[0] if host
+                                          else "claude")
+
+    def _profile_label(self):
+        # `.claude.json` sits inside CLAUDE_CONFIG_DIR when one is set, and
+        # beside ~/.claude when one isn't. Try both, quietly.
+        for candidate in (os.path.join(self.dir, ".claude.json"),
+                          os.path.join(os.path.dirname(self.dir), ".claude.json")):
+            try:
+                with open(candidate) as handle:
+                    account = json.load(handle).get("oauthAccount") or {}
+            except (OSError, ValueError):
+                continue
+            name = account.get("displayName") or account.get("emailAddress")
+            if name:
+                return short_label(name, "claude")
+        return None
+
+    def read(self):
+        if self.host:
+            reading = run_remote(self.host, "claude", self.path)
+            if self.forced_label:
+                reading["label"] = self.forced_label
+            return reading
+        return self.read_here()
+
+    def read_here(self):
+        creds = read_json(os.path.join(self.dir, ".credentials.json"))
+        oauth = creds.get("claudeAiOauth") or {}
+        token = oauth.get("accessToken")
+        if not token:
+            raise QuotaError(Q_AUTH, "no oauth token in %s" % self.dir)
+        expires = oauth.get("expiresAt")
+        if expires and expires / 1000.0 < time.time():
+            raise QuotaError(Q_AUTH, "token expired - run `claude` in %s" % self.dir)
+
+        data = get_json(CLAUDE_USAGE_URL, {
+            "Authorization": "Bearer %s" % token,
+            "anthropic-beta": "oauth-2025-04-20",
+            "Content-Type": "application/json",
+        })
+        five = data.get("five_hour") or {}
+        week, week_name = self._weekly(data)
+        return {
+            "label": self.forced_label or self._profile_label() or self.label,
+            "kind": self.kind,
+            "state": Q_OK,
+            "five": (percent(five.get("utilization")), seconds_until(five.get("resets_at"))),
+            "week": week,
+            "names": (span(CLAUDE_FIVE_HOUR), week_name),
+            "sessions": self.sessions(),
+        }
+
+    @staticmethod
+    def _weekly(data):
+        """The weekly cap that actually binds, and what to call it.
+
+        `seven_day` is the all-models figure, but the `limits` array also carries
+        weekly caps scoped to one model, and those run out first - a week that is
+        29% gone overall can be 41% gone on the model you are actually using. The
+        bar shows whichever is highest and its label says which, because the
+        useful number is the one you will hit, not the flattering one.
+        """
+        overall = data.get("seven_day") or {}
+        best = (percent(overall.get("utilization")),
+                seconds_until(overall.get("resets_at")))
+        name = span(CLAUDE_SEVEN_DAY)
+        if best[0] == 255:
+            best = (0, -1)
+        for limit in data.get("limits") or []:
+            if (limit or {}).get("group") != "weekly":
+                continue
+            used = percent(limit.get("percent"))
+            if used == 255 or used <= best[0]:
+                continue
+            best = (used, seconds_until(limit.get("resets_at")))
+            model = (((limit.get("scope") or {}).get("model")) or {}).get("display_name")
+            name = "%s/%s" % (span(CLAUDE_SEVEN_DAY), model) if model else span(CLAUDE_SEVEN_DAY)
+        return best, name[:8]
+
+    def sessions(self):
+        return count_sessions("claude", self.dir, "CLAUDE_CONFIG_DIR")
+
+
+class CodexSub:
+    """One Codex subscription, read from a `~/.codex`-shaped directory.
+
+    Same bargain as `ClaudeSub`: the token is Codex's to refresh, this only reads
+    it. The usage endpoint is the one the Codex TUI's own status line calls.
+    """
+
+    kind = KIND_CODEX
+
+    def __init__(self, path, label=None, host=None):
+        # A remote path is the far machine's to expand, so leave it alone.
+        self.host = host
+        self.path = path
+        self.dir = path if host else os.path.abspath(os.path.expanduser(path))
+        self.forced_label = label
+        self.label = label or short_label(os.path.basename(self.dir.rstrip("/")),
+                                          host.split("@")[-1].split(".")[0] if host
+                                          else "codex")
+
+    @staticmethod
+    def _expired(token):
+        """Whether a JWT's `exp` has passed. Unreadable means "let the server say"."""
+        try:
+            payload = token.split(".")[1]
+            import base64
+            padded = payload + "=" * (-len(payload) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        except (IndexError, ValueError, TypeError):
+            return False
+        exp = claims.get("exp")
+        return bool(exp) and exp < time.time()
+
+    def read(self):
+        if self.host:
+            reading = run_remote(self.host, "codex", self.path)
+            if self.forced_label:
+                reading["label"] = self.forced_label
+            return reading
+        return self.read_here()
+
+    def read_here(self):
+        auth = read_json(os.path.join(self.dir, "auth.json"))
+        tokens = auth.get("tokens") or {}
+        token = tokens.get("access_token")
+        if not token:
+            raise QuotaError(Q_AUTH, "no chatgpt token in %s" % self.dir)
+        if self._expired(token):
+            raise QuotaError(Q_AUTH, "token expired - run `codex` in %s" % self.dir)
+
+        headers = {"Authorization": "Bearer %s" % token}
+        if tokens.get("account_id"):
+            headers["chatgpt-account-id"] = tokens["account_id"]
+        data = get_json(CODEX_USAGE_URL, headers)
+
+        limits = data.get("rate_limit") or {}
+        primary = limits.get("primary_window") or {}
+        secondary = limits.get("secondary_window") or {}
+
+        def window(spec):
+            return (percent(spec.get("used_percent")),
+                    int(spec.get("reset_after_seconds", -1) or -1))
+
+        def name(spec):
+            return span(int(spec.get("limit_window_seconds", -1) or -1))
+
+        return {
+            "label": self.forced_label
+                     or short_label(data.get("email"), None)
+                     or self.label,
+            "kind": self.kind,
+            "state": Q_OK,
+            "five": window(primary),
+            "week": window(secondary),
+            # Codex reports its own window lengths, so the bars are labelled with
+            # what it said rather than with what it usually says.
+            "names": (name(primary), name(secondary)),
+            "sessions": count_sessions("codex", self.dir, "CODEX_HOME"),
+        }
+
+
+def subscriptions(args):
+    """The accounts to watch: what was asked for, or whatever is logged in here.
+
+    `--claude`/`--codex` take a directory and an optional `=label`, so two Claude
+    plans can be told apart on a row eight characters wide. With neither flag it
+    falls back to the one place each vendor's CLI logs in by default, which is
+    the whole configuration for the common case of one of each.
+    """
+    def split(spec):
+        """`DIR`, `DIR=LABEL`, `HOST:DIR` or `HOST:DIR=LABEL`.
+
+        A colon means the account lives on another machine - scp's spelling, and
+        unambiguous here because a local config directory never has one.
+        """
+        path, _, label = spec.partition("=")
+        host = None
+        if ":" in path:
+            host, _, path = path.partition(":")
+        return path, (short_label(label, None) if label else None), host
+
+    subs = []
+    for spec in getattr(args, "claude", None) or []:
+        subs.append(ClaudeSub(*split(spec)))
+    for spec in getattr(args, "codex", None) or []:
+        subs.append(CodexSub(*split(spec)))
+    if not subs:
+        default_claude = os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"
+        for path in default_claude.split(os.pathsep):
+            if os.path.isdir(os.path.expanduser(path)):
+                subs.append(ClaudeSub(path))
+        if os.path.isdir(os.path.expanduser("~/.codex")):
+            subs.append(CodexSub("~/.codex"))
+    # Three buttons, three rows: see MAX_ACCOUNTS in src/quota.rs.
+    if len(subs) > 3:
+        log("quota: %d accounts, showing the first 3 (the puck has three buttons)"
+            % len(subs))
+    return subs[:3]
+
+
+class Quota:
+    """Relay between the puck and the vendors' usage endpoints.
+
+    The fetching happens on a worker thread rather than in the relay loop. A
+    usage request is a round trip to the internet and the relay loop is also what
+    reads the knob, so doing it inline would make the puck feel dead for as long
+    as the slowest vendor takes to answer. The loop only ever reads the last
+    snapshot, which is what the puck wants anyway: rate-limit windows move over
+    minutes, so a reading a minute old is as true as a fresh one, and the puck
+    counts the reset down from its own clock in between.
+    """
+
+    def __init__(self, link, subs, args):
+        self.link = link
+        self.subs = subs
+        self.period = max(10.0, float(getattr(args, "refresh", REFRESH_DEFAULT)))
+        # Doubled on a failure that isn't the account's fault, halved back on
+        # success: the usage endpoints rate-limit, and a bridge that answers a
+        # 429 by asking again in a minute is the reason it got one.
+        self.backoff = 1.0
+        self.verbose = bool(getattr(args, "verbose", False))
+        self.lock = threading.Lock()
+        self.snapshot = [{"label": sub.label, "kind": sub.kind, "state": Q_WAIT,
+                          "five": (255, -1), "week": (255, -1),
+                          "names": ("5h", "7d"), "sessions": None}
+                         for sub in subs]
+        self.wake = threading.Event()
+        self.reset()
+        if subs:
+            self.worker = threading.Thread(target=self._work, daemon=True)
+            self.worker.start()
+
+    def _blank(self, index, sub, state=Q_WAIT):
+        """A reading with no numbers in it, keeping the name we already knew.
+
+        The name is the part worth holding on to: `Dylan needs logging in again`
+        tells you which of two Claude plans to go and fix, where the directory's
+        own name would just say `claude`.
+        """
+        known = self.snapshot[index]["label"] if index < len(self.snapshot) else None
+        unknown = (255, -1)
+        return {"label": known or sub.label, "kind": sub.kind, "state": state,
+                "five": unknown, "week": unknown, "names": ("5h", "7d"),
+                "sessions": None}
+
+    def reset(self):
+        """Forget what the puck has been told, so the next poll says all of it."""
+        self.sent = [None] * len(self.subs)
+
+    def refresh(self):
+        """Ask the worker to go round again now."""
+        self.wake.set()
+
+    def _work(self):
+        while True:
+            held, asked_for = False, 0.0
+            for index, sub in enumerate(self.subs):
+                try:
+                    reading = sub.read()
+                except QuotaError as error:
+                    if error.keep and self.snapshot[index]["state"] == Q_OK:
+                        held = True
+                        asked_for = max(asked_for, error.retry_after)
+                        if self.verbose:
+                            log("quota: %s: %s (keeping the last reading)"
+                                % (sub.label, error))
+                        continue
+                    reading = self._blank(index, sub, error.state)
+                    log("quota: %s: %s" % (sub.label, error))
+                except Exception as error:              # a vendor changed shape
+                    reading = self._blank(index, sub, Q_ERROR)
+                    log("quota: %s: %s" % (sub.label, error))
+                with self.lock:
+                    was, self.snapshot[index] = self.snapshot[index], reading
+                # Only when it moved, so leaving this running all afternoon
+                # leaves a log of what actually happened rather than a tick a
+                # minute saying nothing.
+                if self.verbose or was != reading:
+                    self._announce(reading)
+            self.backoff = min(self.backoff * 2, 8.0) if held else max(self.backoff / 2, 1.0)
+            # A server that names its own cooling-off period gets the benefit of
+            # the doubt over our guess; Anthropic's sends `Retry-After: 0`, which
+            # is no answer, so the doubling stands. Capped either way: this is a
+            # screen someone is watching, and a row that says nothing for the
+            # best part of an hour reads as broken rather than as patient.
+            wait = min(max(self.period * self.backoff, asked_for), BACKOFF_CAP)
+            self.wake.wait(wait)
+            self.wake.clear()
+
+    @staticmethod
+    def _announce(reading):
+        if reading["state"] == Q_WAIT:
+            return
+        if reading["state"] == Q_AUTH:
+            log("quota: %s needs logging in again" % reading["label"])
+        elif reading["state"] != Q_OK:
+            log("quota: %s unreachable" % reading["label"])
+        else:
+            five, week = reading["five"], reading["week"]
+            running = reading["sessions"]
+            log("quota: %s %d%% of %s, %d%% of %s (resets in %s)%s"
+                % (reading["label"], five[0], reading["names"][0],
+                   week[0], reading["names"][1], span(five[1]),
+                   "" if not running else ", %d running" % running))
+
+    def handle(self, line):
+        fields = line.split()
+        if len(fields) > 1 and fields[1] == "r":
+            log("quota: refresh, asked by the puck")
+            self.refresh()
+
+    def poll(self):
+        """One tick: the heartbeat always, the numbers when they moved."""
+        with self.lock:
+            snapshot = list(self.snapshot)
+        # The count is the heartbeat - it arrives whether or not anything
+        # changed, which is what lets the puck tell "nothing new" from "nobody
+        # home" and say `no bridge` rather than showing an hour-old percentage.
+        self.link.send("#qz %d" % len(snapshot))
+        for index, reading in enumerate(snapshot):
+            if reading == self.sent[index]:
+                continue
+            was = self.sent[index]
+            identity = (reading["label"], reading["kind"], reading["names"])
+            if was is None or (was["label"], was["kind"], was["names"]) != identity:
+                self.link.send("#qa %d %d %s %s %s" % (
+                    index, reading["kind"], reading["names"][0] or "?",
+                    reading["names"][1] or "?", reading["label"]))
+            sessions = -1 if reading["sessions"] is None else reading["sessions"]
+            self.link.send("#qu %d %d %d %d %d %d %d" % (
+                (index,) + tuple(reading["five"]) + tuple(reading["week"])
+                + (sessions, reading["state"])))
+            self.sent[index] = reading
+
+
+def cmd_probe(args):
+    """Take one reading here and print it as JSON. What `run_remote` invokes.
+
+    Not really a user-facing command - though it is a fine way to see what the
+    bridge sees - which is why it takes a bare directory and prints machine
+    output rather than a log line.
+    """
+    reader = ClaudeSub if args.kind == "claude" else CodexSub
+    try:
+        reading = reader(args.dir).read()
+    except QuotaError as error:
+        reading = {"error": str(error), "state": error.state}
+    except Exception as error:
+        reading = {"error": str(error), "state": Q_ERROR}
+    print(json.dumps(reading))
+    return 0
+
+
+def cmd_quota(args):
+    """Report the subscription quotas only: a relay pinned to the quota app."""
+    return run_relay(args, only="quota")
+
+
 def cmd_reset(args):
     link = open_link(args)
     log("asking the puck to reboot into %s mode" % args.mode)
@@ -1190,6 +1949,18 @@ def main():
     subparsers.add_parser("scan", help="what can see the puck right now").set_defaults(run=cmd_scan)
     subparsers.add_parser("monitor", help="print what the puck says").set_defaults(run=cmd_monitor)
 
+    def add_quota_opts(sub):
+        sub.add_argument("--claude", action="append", metavar="[HOST:]DIR[=LABEL]",
+                         help="a Claude Code config directory to report on; repeat for"
+                              " each subscription. HOST: reads it over ssh, on the"
+                              " machine that account is logged in on"
+                              " (default: $CLAUDE_CONFIG_DIR or ~/.claude)")
+        sub.add_argument("--codex", action="append", metavar="[HOST:]DIR[=LABEL]",
+                         help="a Codex config directory to report on (default: ~/.codex)")
+        sub.add_argument("--refresh", type=float, default=REFRESH_DEFAULT,
+                         metavar="SECONDS",
+                         help="how often to ask the vendors (default: %(default)s)")
+
     def add_gantry_opts(sub):
         sub.add_argument("--moonraker", default="http://192.168.1.11:7125",
                          help="Moonraker base URL (default: %(default)s)")
@@ -1201,8 +1972,9 @@ def main():
                               " (default: %(default)s)")
 
     relay = subparsers.add_parser(
-        "relay", help="own the link and follow the puck's view (gantry + music)")
+        "relay", help="own the link and follow the puck's view (gantry, music, quota)")
     add_gantry_opts(relay)
+    add_quota_opts(relay)
     relay.add_argument("--rate", type=float, default=8.0, help="gantry state updates per second")
     relay.add_argument("--wait-for-puck", action="store_true",
                        help="sit and retry until the puck turns up (for running as a service)")
@@ -1220,6 +1992,19 @@ def main():
     spotify.add_argument("--wait-for-puck", action="store_true",
                          help="sit and retry until the puck turns up (for running as a service)")
     spotify.set_defaults(run=cmd_spotify)
+
+    probe = subparsers.add_parser(
+        "probe", help="print one account's usage as JSON (what `quota` runs over ssh)")
+    probe.add_argument("kind", choices=("claude", "codex"))
+    probe.add_argument("dir")
+    probe.set_defaults(run=cmd_probe)
+
+    quota = subparsers.add_parser(
+        "quota", help="show Claude and Codex rate-limit windows on the puck")
+    add_quota_opts(quota)
+    quota.add_argument("--wait-for-puck", action="store_true",
+                       help="sit and retry until the puck turns up (for running as a service)")
+    quota.set_defaults(run=cmd_quota)
 
     flash = subparsers.add_parser("flash", help="reflash over USB")
     flash.add_argument("image", nargs="?", default="out/pico2joy-bringup.uf2")
