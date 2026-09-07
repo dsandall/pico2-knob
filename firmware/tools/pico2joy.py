@@ -1034,10 +1034,17 @@ class Media:
 
     def poll(self):
         status, title, artist, art_url = self.player.now_playing()
+        vol = self.player.volume()
+        v = 255 if vol is None else vol
+        self.last_vol = v
+        # A heartbeat every poll, not just on change: the puck falls back to
+        # "no bridge" if `#ns` goes quiet for a couple of seconds, the same way
+        # the gantry keeps `#s` flowing. Play state and volume ride along, so
+        # both stay live without their own messages.
+        self.link.send("#ns %d %d" % (status, v))
         state = (status, title, artist)
         if state != self.last:
             self.last = state
-            self.link.send("#ns %d %d" % (status, self.last_vol if self.last_vol is not None else 255))
             self.link.send("#nt %s" % title[:88])
             self.link.send("#na %s" % artist[:88])
             log("%s | %s - %s" % (("stopped", "playing", "paused")[status],
@@ -1045,7 +1052,6 @@ class Media:
         if art_url != self.last_art_url:
             self.last_art_url = art_url
             self.send_cover(art_url)
-        self.push_volume()
 
     def run(self):
         period = 1.0 / self.args.rate
