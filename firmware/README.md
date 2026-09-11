@@ -279,6 +279,25 @@ What GRBL changes, next to Klipper:
   or paused: a paused job expects to find the head where it left it.
 - `home all` is `$H`. `#xc stop` is a feed hold rather than a reset, so GRBL
   doesn't forget where the head is.
+- **The finest jog step is one the machine can always take.** This X-Carve
+  moves 0.0375 mm a step in X and Y (`$100`/`$101` = 26.66 steps/mm), so a
+  0.01 mm detent mostly moved nothing at all. The bridge works out the coarsest
+  axis's step from `$100`–`$102`, rounds it up to the 0.01 mm the screen shows,
+  and sends it as `#xr 40`; the puck raises its finest step to 0.04 mm. GRBL
+  rounds a move's end to whole steps, so a move at least one step long always
+  turns into at least one.
+
+### Zeroing the workpiece
+
+On the `xcarve` screen the menu's first row is **`zero X`**, for whichever axis
+BTN1/2/3 last picked; the rest of the menu scrolls below it. It makes the head's
+position the work zero on that axis — `G10 L20 P1 X0` on the active coordinate
+system, what CNCJS's zero buttons send. It takes a second press within three
+seconds (the row says `again?`), because a stray zero throws away a workpiece
+you already touched off. Once it zeroes, the menu closes and the axis reads 0.00.
+
+So, per axis: jog to the spot, press that axis's button, click the knob, and
+press a button twice on `zero`.
 
 ## Now playing (Spotify, or anything)
 
