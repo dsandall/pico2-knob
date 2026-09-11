@@ -80,7 +80,7 @@ Single-key commands:
 | `?`   | help                                                                |
 | `p`   | inputs, detents, 12V_EN, battery, link state                        |
 | `m`   | open/close the on-screen menu (handy without hands on the puck)     |
-| `d`   | next view: cube / gantry / now playing / quota / orientation pattern |
+| `d`   | next view: cube / gantry / xcarve / now playing / quota / orientation pattern |
 | `i`   | re-init the display (reset + full init sequence)                    |
 | `f`   | flip the panel 180 degrees (COM/segment remap)                      |
 | `+`/`-` | contrast, in steps of 0x10 from the vendor default 0x4F           |
@@ -116,8 +116,8 @@ knob zooms. The knob applies **torque, not position** — a detent adds angular
 momentum (about 0.52 rad/s), light drag bleeds it off with a ~5 s half-life, so a
 flick sets it coasting and a counter-flick stops it.
 
-The **gantry view** (third) is the real machine rather than a model of it — see
-below.
+The **gantry** and **xcarve** views, right after it, are real machines rather
+than a model of one — see below.
 
 ## On the puck itself
 
@@ -163,6 +163,7 @@ tools/pico2joy.py scan            # what can see the puck right now
 tools/pico2joy.py monitor         # console passthrough
 tools/pico2joy.py relay           # every app, following the puck's view
 tools/pico2joy.py gantry          # just the gantry (relay pinned to one app)
+tools/pico2joy.py xcarve          # just the X-Carve, through CNCJS
 tools/pico2joy.py quota           # just the Claude/Codex rate-limit windows
 tools/pico2joy.py flash out/pico2joy-bringup.uf2   # reflash, no reset button
 tools/pico2joy.py reset uf2|serial|ota             # into a bootloader mode
@@ -232,6 +233,52 @@ On the gantry screen **BTN1/2/3 are X/Y/Z** (not the cube's `BUTTON_AXIS` order)
 the knob jogs the selected axis by the step size from the menu (0.01 / 0.1 / 1 /
 10 mm), and `home all` in the menu sends `#c home`. Each axis shows its position,
 its travel as a bar with the head's place in it, and dashes if it isn't homed.
+
+## Driving the X-Carve
+
+The X-Carve has its own screen, `xcarve`, right after `gantry` — and it is the
+same screen: the travel volume with the head in it, BTN1/2/3 for X/Y/Z, the knob
+to jog, `home all` to home. Underneath it is a second `gantry::Machine` on its
+own message types, the printer's lines with an `x` after the `#` — `#xs`/`#xl`
+down, `#xj`/`#xc` up — so the two machines never read each other's state and
+one relay could serve both.
+
+The bridge lives on `rpi-xcarve`, the Pi that runs CNCJS next to the machine,
+with the puck on its USB:
+
+```
+scp tools/pico2joy.py rpi-xcarve.netbird.cloud:pico2joy/
+ssh rpi-xcarve.netbird.cloud 'python3 ~/pico2joy/pico2joy.py --link usb xcarve'
+```
+
+`tools/pico2joy-xcarve.service` runs the same thing at boot.
+
+**CNCJS stays in charge of the machine.** It owns the X-Controller's serial port,
+and the bridge joins that connection the way a second browser tab does, so the
+CNCJS page and the puck work side by side. It doesn't take the port from anyone:
+close it in CNCJS and the bridge waits until somebody opens it again. It speaks
+socket.io over plain HTTP long-polling rather than a websocket, which keeps it
+standard library only — the Pi has no pip to reach — and it signs its own token
+with the secret in CNCJS's `~/.cncrc`, which is why it runs as the user CNCJS
+runs as.
+
+What GRBL changes, next to Klipper:
+
+- **Positions are work coordinates** — the numbers CNCJS shows, the ones you
+  zero. The travel limits go down in the same frame (machine travel
+  `-$130..0`, shifted by the work offset), so the head still lands in the right
+  place in the frame, and re-zeroing moves the limits along with it.
+- **"Homed" means "not in Alarm".** GRBL has no per-axis flag; with homing on
+  (`$22=1`) it boots into Alarm and stays there until `$H`. The catch is `$X`,
+  which unlocks without homing and leaves the limits describing nothing — and
+  soft limits are off on this machine (`$20=0`), so nothing below the puck would
+  stop an over-travel either. Home it.
+- **Jogs are `$J=` moves** — `$J=G91 G21 X0.100 F3000`, Z at 400 mm/min — which
+  GRBL 1.1 keeps out of the modal state, so there is nothing to save and restore
+  around them. They only go out from Idle, and never while a CNCJS job is running
+  or paused: a paused job expects to find the head where it left it.
+- `home all` is `$H`. `#xc stop` is a feed hold rather than a reset, so GRBL
+  doesn't forget where the head is.
 
 ## Now playing (Spotify, or anything)
 
