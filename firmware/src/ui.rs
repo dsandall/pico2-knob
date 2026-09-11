@@ -22,10 +22,12 @@ pub struct State {
     pub millivolts: u16,
 }
 
-/// What the menu offers. The order is the order on screen, and
-/// [`MenuItem::COUNT`] is what the knob wraps around.
+/// What the menu offers. Which rows, in which order, is a list per screen:
+/// [`MENU`] everywhere, and [`XCARVE_MENU`] on the X-Carve.
 #[derive(Copy, Clone, PartialEq)]
 pub enum MenuItem {
+    /// Work zero on the selected axis, here. Takes a second press.
+    Zero,
     Link,
     Rail,
     Led,
@@ -37,25 +39,39 @@ pub enum MenuItem {
     Exit,
 }
 
+pub const MENU: &[MenuItem] = &[
+    MenuItem::Link,
+    MenuItem::Rail,
+    MenuItem::Led,
+    MenuItem::Screen,
+    MenuItem::Step,
+    MenuItem::Accel,
+    MenuItem::Home,
+    MenuItem::Battery,
+    MenuItem::Exit,
+];
+
+/// Setting up a job comes first: it is why the menu is open on this screen.
+pub const XCARVE_MENU: &[MenuItem] = &[
+    MenuItem::Zero,
+    MenuItem::Link,
+    MenuItem::Rail,
+    MenuItem::Led,
+    MenuItem::Screen,
+    MenuItem::Step,
+    MenuItem::Accel,
+    MenuItem::Home,
+    MenuItem::Battery,
+    MenuItem::Exit,
+];
+
+/// Rows that fit under the title bar. A longer menu scrolls.
+const MENU_ROWS: usize = 9;
+
 impl MenuItem {
-    pub const COUNT: u8 = 9;
-
-    pub fn from_index(index: u8) -> Self {
-        match index % Self::COUNT {
-            0 => Self::Link,
-            1 => Self::Rail,
-            2 => Self::Led,
-            3 => Self::Screen,
-            4 => Self::Step,
-            5 => Self::Accel,
-            6 => Self::Home,
-            7 => Self::Battery,
-            _ => Self::Exit,
-        }
-    }
-
     fn label(self) -> &'static str {
         match self {
+            Self::Zero => "zero",
             Self::Link => "ble",
             Self::Rail => "12V rail",
             Self::Led => "led",
@@ -70,7 +86,12 @@ impl MenuItem {
 }
 
 pub struct MenuState {
+    pub items: &'static [MenuItem],
     pub selected: u8,
+    /// The axis the `zero` row acts on, and whether it is waiting for a second
+    /// press.
+    pub axis: usize,
+    pub zero_armed: bool,
     pub link: &'static str,
     pub vpp_on: bool,
     pub led: &'static str,
@@ -130,20 +151,41 @@ pub fn draw_menu(d: &mut Display<'_>, menu: &MenuState) {
         .alignment(Alignment::Right)
         .build();
 
-    for index in 0..MenuItem::COUNT {
-        let item = MenuItem::from_index(index);
-        let y = 18 + 12 * index as i32;
-        let selected = index == menu.selected % MenuItem::COUNT;
+    // The window over the list: the top until the selection runs off its bottom,
+    // then following it down.
+    let count = menu.items.len();
+    let chosen = menu.selected as usize % count;
+    let top = chosen.saturating_sub(MENU_ROWS - 1);
+
+    for (row, index) in (top..count.min(top + MENU_ROWS)).enumerate() {
+        let item = menu.items[index];
+        let y = 18 + 12 * row as i32;
+        let selected = index == chosen;
         if selected {
-            let _ = Rectangle::new(Point::new(0, y - 1), Size::new(128, 12))
+            // Two pixels short of the edge, so the scroll bar still shows.
+            let _ = Rectangle::new(Point::new(0, y - 1), Size::new(126, 12))
                 .into_styled(fill)
                 .draw(d);
         }
         let style = if selected { small_inv } else { small };
-        let _ = Text::with_text_style(item.label(), Point::new(4, y), style, top_left).draw(d);
+        let mut label: String<16> = String::new();
+        match item {
+            MenuItem::Zero => {
+                let _ = write!(label, "{} {}", item.label(), AXIS_NAMES[menu.axis % 3]);
+            }
+            _ => {
+                let _ = label.push_str(item.label());
+            }
+        }
+        let _ = Text::with_text_style(&label, Point::new(4, y), style, top_left).draw(d);
 
         let mut value: String<12> = String::new();
         match item {
+            MenuItem::Zero => {
+                if menu.zero_armed {
+                    let _ = value.push_str("again?");
+                }
+            }
             MenuItem::Link => {
                 let _ = write!(value, "{}", menu.link);
             }
@@ -172,6 +214,16 @@ pub fn draw_menu(d: &mut Display<'_>, menu: &MenuState) {
         if !value.is_empty() {
             let _ = Text::with_text_style(&value, Point::new(124, y), style, top_right).draw(d);
         }
+    }
+
+    // Where the window sits in a list longer than it, down the right-hand edge.
+    if count > MENU_ROWS {
+        let track = 12 * MENU_ROWS as i32;
+        let thumb = track * MENU_ROWS as i32 / count as i32;
+        let offset = (track - thumb) * top as i32 / (count - MENU_ROWS) as i32;
+        let _ = Rectangle::new(Point::new(127, 17 + offset), Size::new(1, thumb as u32))
+            .into_styled(fill)
+            .draw(d);
     }
 }
 
@@ -220,7 +272,12 @@ impl core::fmt::Display for Millimetres {
 /// A wheel rather than a list because the input is a wheel - the thing in your
 /// hand goes round, so the choices go round, and "two clicks anticlockwise" is
 /// a gesture you can make without reading the screen twice.
-pub fn draw_wheel(d: &mut Display<'_>, selected: usize, millivolts: u16) {
+pub fn draw_wheel(
+    d: &mut Display<'_>,
+    machine: &crate::gantry::Machine,
+    selected: usize,
+    millivolts: u16,
+) {
     d.clear();
     header(d, millivolts);
 
@@ -236,7 +293,7 @@ pub fn draw_wheel(d: &mut Display<'_>, selected: usize, millivolts: u16) {
     // Four seats around the knob, clockwise from the top. Hard-coded rather
     // than trigonometry: four points do not need `sinf`.
     const SEATS: [(i32, i32); 4] = [(64, 44), (98, 72), (64, 100), (30, 72)];
-    let steps = crate::gantry::STEPS_UM;
+    let steps = machine.steps_um();
 
     let _ = Text::with_text_style("jog step", Point::new(64, 72), small, centred).draw(d);
 
@@ -467,10 +524,10 @@ pub fn draw_gantry(
         // rest. The multiplier vanishing again is the point - it means the
         // acceleration stopped applying.
         Some(gain) => {
-            let _ = write!(step, "{}mm x{gain}", Millimetres(crate::gantry::step_um()));
+            let _ = write!(step, "{}mm x{gain}", Millimetres(machine.step_um()));
         }
         None => {
-            let _ = write!(step, "{}mm", Millimetres(crate::gantry::step_um()));
+            let _ = write!(step, "{}mm", Millimetres(machine.step_um()));
         }
     }
     let _ = Text::with_text_style(&step, Point::new(126, 115), small, top_right).draw(d);

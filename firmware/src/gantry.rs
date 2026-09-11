@@ -21,6 +21,7 @@
 //! ```text
 //! host -> puck   #<p>s <x> <y> <z> <homed-bits> <state>     toolhead state
 //!                #<p>l <xmin> <xmax> <ymin> <ymax> <zmin> <zmax>   travel limits
+//!                #<p>r <um>                                  finest jog that always moves
 //! puck -> host   #<p>j <axis> <delta-um>                     jog request
 //!                #<p>c <command>                             named command
 //! ```
@@ -67,8 +68,10 @@ pub fn recent_gain() -> Option<u8> {
 /// update doesn't blink the screen to "offline".
 const STALE_MS: u32 = 1200;
 
-/// Jog step sizes, coarsest last. The menu cycles these. One step size for the
-/// knob, whichever machine it is driving: it is a feel, not a machine setting.
+/// Jog step sizes, coarsest last. The menu cycles these. Which of them is chosen
+/// is one setting for the knob, whichever machine it is driving - it is a feel -
+/// but a machine can raise the finest to what it can actually move: see
+/// [`Machine::steps_um`].
 pub const STEPS_UM: [i32; 4] = [10, 100, 1_000, 10_000];
 static STEP: AtomicU8 = AtomicU8::new(1);
 
@@ -76,21 +79,15 @@ pub fn step_index() -> usize {
     STEP.load(Ordering::Relaxed) as usize % STEPS_UM.len()
 }
 
-pub fn step_um() -> i32 {
-    STEPS_UM[step_index()]
-}
-
 /// Pick a step size outright, which is what the wheel does.
-pub fn set_step(index: usize) -> i32 {
+pub fn set_step(index: usize) -> usize {
     let index = index % STEPS_UM.len();
     STEP.store(index as u8, Ordering::Relaxed);
-    STEPS_UM[index]
+    index
 }
 
-pub fn next_step() -> i32 {
-    let next = (STEP.load(Ordering::Relaxed) as usize + 1) % STEPS_UM.len();
-    STEP.store(next as u8, Ordering::Relaxed);
-    STEPS_UM[next]
+pub fn next_step() -> usize {
+    set_step(step_index() + 1)
 }
 
 /// State 2 is "in the middle of a job" on every machine: that is the one a jog
@@ -121,6 +118,8 @@ pub struct Machine {
     /// this and the render loop drains it, so spinning fast coalesces into one move
     /// instead of a queue of them.
     pending_um: [AtomicI32; AXES],
+    /// The shortest jog this machine always turns into movement, from `#<p>r`.
+    floor_um: AtomicI32,
 }
 
 impl Machine {
@@ -139,7 +138,20 @@ impl Machine {
             state: AtomicU8::new(0),
             seen_ms: AtomicU32::new(0),
             pending_um: [AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0)],
+            floor_um: AtomicI32::new(STEPS_UM[0]),
         }
+    }
+
+    /// The jog steps on offer here: [`STEPS_UM`], with any finer than the
+    /// machine's floor raised to it. A detent that rounds to no motor step
+    /// isn't a fine jog, it's a knob that sometimes does nothing.
+    pub fn steps_um(&self) -> [i32; 4] {
+        let floor = self.floor_um.load(Ordering::Relaxed);
+        STEPS_UM.map(|step| step.max(floor))
+    }
+
+    pub fn step_um(&self) -> i32 {
+        self.steps_um()[step_index()]
     }
 
     pub fn position(&self, axis: usize) -> i32 {
@@ -177,14 +189,24 @@ impl Machine {
         self.states[BUSY as usize]
     }
 
+    /// Why a move on `axis` would be refused right now, or `None` if it would go.
     /// A jog is only worth asking for when someone is listening and the axis knows
     /// where it is; anything else would just bounce off the machine.
-    pub fn can_jog(&self, axis: usize) -> bool {
-        self.online() && self.homed(axis) && self.state.load(Ordering::Relaxed) != BUSY
+    pub fn refusal(&self, axis: usize) -> Option<&'static str> {
+        if !self.online() {
+            Some("no bridge")
+        } else if !self.homed(axis) {
+            Some("not homed")
+        } else if self.state.load(Ordering::Relaxed) == BUSY {
+            Some(self.busy_label())
+        } else {
+            None
+        }
     }
 
     /// Queue a jog of `steps` detents on `axis`, clamped to the axis's travel so the
-    /// puck doesn't ask for a move the machine will refuse.
+    /// puck doesn't ask for a move the machine will refuse. Returns what was
+    /// actually queued.
     ///
     /// The clamp can only shorten a jog, never turn it round: a head reported
     /// outside its limits - a GRBL machine unlocked without homing - would
@@ -192,7 +214,7 @@ impl Machine {
     /// way the knob went.
     pub fn jog(&self, axis: usize, steps: i32) -> i32 {
         let (min, max) = self.limits(axis);
-        let want = steps * step_um();
+        let want = steps * self.step_um();
         let from = self.position(axis) + self.pending_um[axis].load(Ordering::Relaxed);
         let target = (from + want).clamp(min, max);
         let delta = target - from;
@@ -216,6 +238,11 @@ impl Machine {
     /// Ask the machine to home, say. The bridge decides what that means.
     pub fn request(&self, command: &str) {
         proto!("#{}c {command}", self.prefix);
+    }
+
+    /// A command about one axis: `#xc zero 0`, say.
+    pub fn request_axis(&self, command: &str, axis: usize) {
+        proto!("#{}c {command} {axis}", self.prefix);
     }
 
     /// Parse one `#`-line from the host, if it is this machine's. Unknown lines
@@ -264,6 +291,14 @@ impl Machine {
                             self.min_um[axis].store(min, Ordering::Relaxed);
                             self.max_um[axis].store(max, Ordering::Relaxed);
                         }
+                    }
+                }
+                true
+            }
+            "r" => {
+                if let Some(um) = fields.next().and_then(|f| f.parse::<i32>().ok()) {
+                    if um > 0 {
+                        self.floor_um.store(um, Ordering::Relaxed);
                     }
                 }
                 true

@@ -214,6 +214,13 @@ static GANTRY_NUMBERS: AtomicBool = AtomicBool::new(false);
 /// button is held, so it can't be left on by accident.
 static WHEEL_OPEN: AtomicBool = AtomicBool::new(false);
 static WHEEL_SEL: AtomicU8 = AtomicU8::new(0);
+/// The X-Carve menu's `zero` row, pressed once: when (ms since boot, never 0)
+/// and for which axis. Zeroing throws away wherever zero was - a workpiece
+/// you took five minutes to touch off - so it takes a second press on the same
+/// axis inside [`ZERO_CONFIRM_MS`].
+static ZERO_ARMED_MS: AtomicU32 = AtomicU32::new(0);
+static ZERO_ARMED_AXIS: AtomicU8 = AtomicU8::new(0);
+const ZERO_CONFIRM_MS: u32 = 3000;
 
 
 /// The device's control model: three jog counters, one selected axis. The knob
@@ -294,6 +301,23 @@ fn machine(view: u8) -> Option<&'static gantry::Machine> {
         VIEW_XCARVE => Some(&gantry::XCARVE),
         _ => None,
     }
+}
+
+/// The menu for the screen that is up: the X-Carve's leads with `zero`.
+fn menu_items() -> &'static [ui::MenuItem] {
+    if VIEW.load(Ordering::Relaxed) == VIEW_XCARVE {
+        ui::XCARVE_MENU
+    } else {
+        ui::MENU
+    }
+}
+
+/// Has `zero` been pressed once on this axis, recently enough to take a second?
+fn zero_armed(axis: usize) -> bool {
+    let at = ZERO_ARMED_MS.load(Ordering::Relaxed);
+    at != 0
+        && ZERO_ARMED_AXIS.load(Ordering::Relaxed) as usize == axis
+        && (embassy_time::Instant::now().as_millis() as u32).wrapping_sub(at) < ZERO_CONFIRM_MS
 }
 
 pub fn view_label() -> &'static str {
@@ -749,10 +773,12 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         } else if MENU_OPEN.load(Ordering::Relaxed) {
                             // In the menu the knob moves the selection instead of
                             // spinning the counter.
-                            let count = ui::MenuItem::COUNT as i32;
+                            let count = menu_items().len() as i32;
                             let selected = MENU_SEL.load(Ordering::Relaxed) as i32;
                             let next = (selected + direction).rem_euclid(count);
                             MENU_SEL.store(next as u8, Ordering::Relaxed);
+                            // A confirm belongs to the row it was asked on.
+                            ZERO_ARMED_MS.store(0, Ordering::Relaxed);
                         } else {
                             detents += direction;
                             DETENTS.store(detents, Ordering::Relaxed);
@@ -806,8 +832,8 @@ async fn main(_spawner: embassy_executor::Spawner) {
                                     // The real machine: the knob asks it to move,
                                     // and the screen only changes once it says it
                                     // did.
-                                    (Some(axis), Some(machine)) => {
-                                        if machine.can_jog(axis) {
+                                    (Some(axis), Some(machine)) => match machine.refusal(axis) {
+                                        None => {
                                             // One detent is worth more when the
                                             // knob is moving - see [`accel`].
                                             let steps = accel::steps_for(rate);
@@ -818,20 +844,11 @@ async fn main(_spawner: embassy_executor::Spawner) {
                                                 ui::AXIS_NAMES[axis],
                                                 ui::Millimetres(delta)
                                             );
-                                        } else {
-                                            logln!(
-                                                "jog {} refused: {}",
-                                                ui::AXIS_NAMES[axis],
-                                                if !machine.online() {
-                                                    "no bridge"
-                                                } else if !machine.homed(axis) {
-                                                    "not homed"
-                                                } else {
-                                                    machine.busy_label()
-                                                }
-                                            );
                                         }
-                                    }
+                                        Some(why) => {
+                                            logln!("jog {} refused: {why}", ui::AXIS_NAMES[axis]);
+                                        }
+                                    },
                                     (Some(axis), None) => {
                                         // The knob's real job: jog the chosen axis.
                                         let jogged = AXIS_COUNTS[axis]
@@ -892,8 +909,12 @@ async fn main(_spawner: embassy_executor::Spawner) {
             // is pointing at is the new step.
             if WHEEL_OPEN.load(Ordering::Relaxed) && !pressed[..3].iter().any(|&d| d) {
                 WHEEL_OPEN.store(false, Ordering::Relaxed);
-                let step = gantry::set_step(WHEEL_SEL.load(Ordering::Relaxed) as usize);
-                logln!("wheel: step {} mm", ui::Millimetres(step));
+                let index = gantry::set_step(WHEEL_SEL.load(Ordering::Relaxed) as usize);
+                let machine = machine(VIEW.load(Ordering::Relaxed)).unwrap_or(&gantry::GANTRY);
+                logln!(
+                    "wheel: step {} mm",
+                    ui::Millimetres(machine.steps_um()[index])
+                );
             }
 
             // Switches, with a few ms of "must stay put" debounce.
@@ -1016,7 +1037,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         if machine.homed(0) { 'x' } else { '-' },
                         if machine.homed(1) { 'y' } else { '-' },
                         if machine.homed(2) { 'z' } else { '-' },
-                        ui::Millimetres(gantry::step_um())
+                        ui::Millimetres(machine.step_um())
                     );
                 }
             }
@@ -1202,7 +1223,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     shown.position(1),
                     shown.position(2),
                     shown.state_label(),
-                    gantry::step_um(),
+                    shown.step_um(),
                     shown.homed(0) as u8 | (shown.homed(1) as u8) << 1 | (shown.homed(2) as u8) << 2,
                     GANTRY_NUMBERS.load(Ordering::Relaxed),
                     WHEEL_OPEN.load(Ordering::Relaxed),
@@ -1217,6 +1238,9 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     (
                         quota::generation(),
                         if view == VIEW_QUOTA { quota::tick() } else { 0 },
+                        // The X-Carve menu shows `zero` waiting for a second
+                        // press, and that window closes on its own.
+                        zero_armed(axis),
                     ),
                 ),
             );
@@ -1229,12 +1253,15 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     (true, _) => ui::draw_menu(
                         &mut screen,
                         &ui::MenuState {
+                            items: menu_items(),
                             selected: MENU_SEL.load(Ordering::Relaxed),
+                            axis,
+                            zero_armed: zero_armed(axis),
                             link: link_label(),
                             vpp_on: boost.on,
                             led: led_label(),
                             view: view_label(),
-                            step_um: gantry::step_um(),
+                            step_um: shown.step_um(),
                             accel: accel::profile_label(),
                             millivolts: state.millivolts,
                         },
@@ -1250,6 +1277,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     (false, VIEW_GANTRY | VIEW_XCARVE) if WHEEL_OPEN.load(Ordering::Relaxed) => {
                         ui::draw_wheel(
                             &mut screen,
+                            shown,
                             WHEEL_SEL.load(Ordering::Relaxed) as usize,
                             state.millivolts,
                         )
@@ -1405,7 +1433,28 @@ async fn main(_spawner: embassy_executor::Spawner) {
 /// Act on the highlighted menu row. Everything routes through the same request
 /// flags the console commands use, so there is one implementation of each action.
 fn activate_menu_item() {
-    match ui::MenuItem::from_index(MENU_SEL.load(Ordering::Relaxed)) {
+    let items = menu_items();
+    let axis = AXIS.load(Ordering::Relaxed) as usize % 3;
+    let name = ui::AXIS_NAMES[axis];
+    let carve = &gantry::XCARVE;
+    match items[MENU_SEL.load(Ordering::Relaxed) as usize % items.len()] {
+        // The X-Carve only: work zero on the selected axis, where the head is.
+        // Closes the menu once it has zeroed, so the 0.00 is the next thing seen.
+        ui::MenuItem::Zero => match carve.refusal(axis) {
+            Some(why) => logln!("menu: zero {name} refused: {why}"),
+            None if zero_armed(axis) => {
+                ZERO_ARMED_MS.store(0, Ordering::Relaxed);
+                carve.request_axis("zero", axis);
+                MENU_OPEN.store(false, Ordering::Relaxed);
+                logln!("menu: zero {name}");
+            }
+            None => {
+                let now = embassy_time::Instant::now().as_millis() as u32;
+                ZERO_ARMED_AXIS.store(axis as u8, Ordering::Relaxed);
+                ZERO_ARMED_MS.store(now.max(1), Ordering::Relaxed);
+                logln!("menu: zero {name}? press again to confirm");
+            }
+        },
         ui::MenuItem::Link => {
             let on = !RADIO_ON.fetch_xor(true, Ordering::Relaxed);
             logln!("menu: link {}", if on { "on" } else { "off" });
@@ -1417,8 +1466,12 @@ fn activate_menu_item() {
         }
         ui::MenuItem::Screen => REQ_VIEW.store(true, Ordering::Relaxed),
         ui::MenuItem::Step => {
-            let um = gantry::next_step();
-            logln!("menu: jog step {} mm", ui::Millimetres(um));
+            let index = gantry::next_step();
+            let machine = machine(VIEW.load(Ordering::Relaxed)).unwrap_or(&gantry::GANTRY);
+            logln!(
+                "menu: jog step {} mm",
+                ui::Millimetres(machine.steps_um()[index])
+            );
         }
         ui::MenuItem::Accel => {
             let profile = accel::next_profile();
