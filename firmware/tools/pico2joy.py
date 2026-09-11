@@ -680,6 +680,7 @@ class Cncjs:
         self.joined = False                   # in the port's room, getting its events
         self.rejoin_at = 0.0
         self.status = {}
+        self.parser = {}
         self.settings = {}
         self.workflow = "idle"
         self.error = None
@@ -744,8 +745,11 @@ class Cncjs:
         self.emit("command", self.port, cmd, *args)
 
     def snapshot(self):
+        """Status, settings, workflow state, whether we're on the port, and the
+        active coordinate system (`G54`...)."""
         with self.lock:
-            return dict(self.status), dict(self.settings), self.workflow, self.joined
+            wcs = (self.parser.get("modal") or {}).get("wcs", "")
+            return dict(self.status), dict(self.settings), self.workflow, self.joined, wcs
 
     def close(self):
         """Leave, politely. Never `close` the port: that would close it for the
@@ -843,6 +847,7 @@ class Cncjs:
         if name == "Grbl:state" and args:
             with self.lock:
                 self.status = args[0].get("status") or {}
+                self.parser = args[0].get("parserstate") or {}
         elif name == "Grbl:settings" and args:
             with self.lock:
                 self.settings = args[0].get("settings") or {}
@@ -883,6 +888,10 @@ class Carve:
       on this machine, so nothing below the puck would catch it either. Home it.
     - Jogs are GRBL 1.1 `$J=` moves, which leave the modal state alone: no
       save-and-restore around them, and a job's G90 is never at risk.
+    - The finest jog step is one the machine can always take, and the puck is
+      told so with `#xr` - see `poll`.
+    - `zero <axis>` is `G10 L20 P<n> X0` on the active coordinate system: the
+      head's position becomes that axis's work zero.
     """
 
     def __init__(self, link, cnc, args):
@@ -896,6 +905,8 @@ class Carve:
         self.state = 0
         self.homed = False
         self.workflow = "idle"
+        self.wcs = ""
+        self.resolution_um = 0
         self.position = [0.0, 0.0, 0.0]
         self.queued = [0, 0, 0]
         self.queued_since = 0.0
@@ -903,7 +914,7 @@ class Carve:
 
     def poll(self):
         """Read CNCJS's latest word. False while there is no machine to describe."""
-        status, settings, self.workflow, joined = self.cnc.snapshot()
+        status, settings, self.workflow, joined, self.wcs = self.cnc.snapshot()
         wpos, wco = status.get("wpos") or {}, status.get("wco") or {}
         self.active = status.get("activeState", "")
         if not joined or not self.active or not wpos:
@@ -925,17 +936,29 @@ class Carve:
             travel = None
         if travel:
             self.limits = [(um(-travel[i] - offset[i]), um(-offset[i])) for i in range(3)]
+        # The smallest jog that always moves: one step of the coarsest axis. GRBL
+        # rounds a move's end to whole steps, so anything shorter can round to no
+        # move at all - 0.01 mm is a quarter of a step in X here. Rounded up to
+        # the 0.01 mm the puck displays, so the step it shows is the step it takes.
+        try:
+            coarsest = max(1000.0 / float(settings["$10%d" % index]) for index in range(3))
+        except (KeyError, ValueError, ZeroDivisionError):
+            coarsest = 0.0
+        self.resolution_um = int(-(-coarsest // 10)) * 10
         return True
 
     def push(self, now):
         # Limits first: after a re-zero the puck should clamp in the new frame
         # before it sees a position in it.
-        if self.limits and (self.limits != self.sent_limits or now - self.limits_sent > 5.0):
-            self.limits_sent, self.sent_limits = now, self.limits
+        frame = (self.limits, self.resolution_um)
+        if self.limits and (frame != self.sent_limits or now - self.limits_sent > 5.0):
+            self.limits_sent, self.sent_limits = now, frame
             flat = []
             for low, high in self.limits:
                 flat += [low, high]
             self.link.send("#xl " + " ".join(str(v) for v in flat))
+            if self.resolution_um:
+                self.link.send("#xr %d" % self.resolution_um)
         self.link.send("#xs %d %d %d %d %d" % (
             um(self.position[0]), um(self.position[1]), um(self.position[2]),
             0b111 if self.homed else 0, self.state))
@@ -1005,8 +1028,42 @@ class Carve:
         except OSError as error:
             log("jog %s failed: %s" % (travel, error))
 
+    def zero(self, fields):
+        """Make the head's position the work zero on one axis.
+
+        `G10 L20` sets the active coordinate system's offset so that the current
+        position reads 0 - the same thing CNCJS's zero buttons do. Only from Idle
+        with no job, like a jog: GRBL refuses G-code in Alarm, and a job's
+        coordinates are not to be moved out from under it.
+        """
+        try:
+            index = int(fields[0])
+        except (IndexError, ValueError):
+            index = -1
+        if index not in (0, 1, 2):
+            log("bad zero: %r" % (fields,))
+            return
+        axis = AXES[index].upper()
+        if self.workflow != "idle" or self.active != "Idle":
+            log("refused zero %s: %s" % (
+                axis, self.active if self.workflow == "idle" else "job " + self.workflow))
+            return
+        # G54..G59 are P1..P6; anything else is a parser state this doesn't know.
+        if self.wcs not in ("G54", "G55", "G56", "G57", "G58", "G59"):
+            log("refused zero %s: coordinate system %r" % (axis, self.wcs))
+            return
+        line = "G10 L20 P%d %s0" % (int(self.wcs[1:]) - 53, axis)
+        log("command zero %s -> %s" % (axis, line))
+        try:
+            self.cnc.command("gcode", line)
+        except OSError as error:
+            log("zero %s failed: %s" % (axis, error))
+
     def command(self, fields):
         name = fields[0] if fields else ""
+        if name == "zero":
+            self.zero(fields[1:])
+            return
         if name == "home":
             if self.workflow != "idle":
                 log("refused home: job %s" % self.workflow)
