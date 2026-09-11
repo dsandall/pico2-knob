@@ -1,0 +1,24 @@
+[Unit]
+# The pico2joy knob, relaying jogs into the X-Carve through CNCJS, on the Pi that
+# lives with the machine. Wants rather than Requires cncjs: the relay reconnects
+# to CNCJS by itself, and sits and retries until the puck is plugged in.
+Description=pico2joy X-Carve relay
+Documentation=https://github.com/softek/pico2-knob
+Wants=cncjs.service
+After=cncjs.service network-online.target
+
+[Service]
+Type=simple
+# The user CNCJS runs as: the relay signs its CNCJS token with ~/.cncrc's secret,
+# and needs dialout for the puck's ttyACM.
+User=thebu
+Group=thebu
+WorkingDirectory=/home/thebu/pico2joy
+ExecStart=/usr/bin/python3 /home/thebu/pico2joy/pico2joy.py --link usb xcarve --wait-for-puck
+Restart=always
+RestartSec=5
+ProtectSystem=full
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

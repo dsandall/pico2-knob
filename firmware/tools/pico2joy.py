@@ -9,6 +9,7 @@
     tools/pico2joy.py monitor                 # console passthrough
     tools/pico2joy.py relay                   # every app, following the screen
     tools/pico2joy.py gantry                  # drive a Klipper gantry
+    tools/pico2joy.py xcarve                  # drive the X-Carve, through CNCJS
     tools/pico2joy.py spotify                 # transport + album art for the player
     tools/pico2joy.py quota                   # Claude/Codex rate-limit windows
     tools/pico2joy.py flash out/…uf2          # reflash over USB, no reset button
@@ -35,8 +36,11 @@ everything over USB, which is what the printer host has.
 """
 
 import argparse
+import base64
 import errno
 import glob
+import hashlib
+import hmac
 import json
 import os
 import queue
@@ -48,6 +52,7 @@ import termios
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -60,6 +65,15 @@ STATES = {"standby": 1, "complete": 1, "cancelled": 1, "printing": 2, "paused": 
 # Jog feedrates, mm/min. Z is slower because a Z jog usually means the nozzle is
 # near something.
 FEED = {"x": 6000.0, "y": 6000.0, "z": 900.0}
+
+# GRBL's activeState onto the same enum: 1 ready, 2 mid-job, 3 held, 4 alarm.
+# Jog and Check are "ready" because a jog is exactly what the knob is doing.
+GRBL_STATES = {"Idle": 1, "Jog": 1, "Check": 1, "Run": 2, "Home": 2,
+               "Hold": 3, "Door": 3, "Alarm": 4, "Sleep": 0}
+
+# X-Carve jog feedrates, mm/min. GRBL's own ceilings there are $110/$111 = 8000
+# and $112 = 500; a knob wants to sit well inside them, Z most of all.
+CARVE_FEED = {"x": 3000.0, "y": 3000.0, "z": 400.0}
 
 USB_GLOB = "/dev/serial/by-id/*pico2joy*"
 BLE_NAME = "pico2joy"
@@ -619,6 +633,398 @@ class Gantry:
             log("%s failed: %s" % (name, error))
 
 
+# --------------------------------------------------------------------------
+# the X-Carve (GRBL, through CNCJS)
+# --------------------------------------------------------------------------
+
+def utf16_len(text):
+    """String length the way JavaScript counts it, which is how engine.io does."""
+    return sum(2 if ord(ch) > 0xFFFF else 1 for ch in text)
+
+
+class Cncjs:
+    """CNCJS, as a socket.io 2 client over engine.io 3's long-polling transport.
+
+    CNCJS owns the X-Controller's serial port, so this joins the connection it
+    already holds - the way a second browser tab does - instead of opening the
+    port itself. socket.io would normally upgrade to a websocket; nothing here
+    needs one, and plain HTTP keeps this standard-library only like the rest of
+    the USB path (the Pi next to the machine has no pip to reach).
+
+    Engine.io 3 frames a polling payload as `<length>:<packet>` repeated, the
+    length in UTF-16 units. A packet is a type digit and a body: 0 open, 1 close,
+    2 ping, 3 pong, 4 message, 6 noop. A message carries a socket.io packet with
+    its own type digit - 0 connect, 2 event (`["name", args...]`), 4 error. The
+    client pings every `pingInterval`, or the server drops the session.
+
+    State arrives as events and is cached; nothing polls GRBL from here, because
+    CNCJS already asks it for a status report several times a second.
+
+    If someone closes the port in CNCJS, this does not reopen it - that was on
+    purpose, whoever did it. It asks for the port list every few seconds and
+    rejoins once somebody opens it again. Only a fresh connection (the bridge
+    starting, or CNCJS restarting) opens a port nobody has open.
+    """
+
+    def __init__(self, base, port, rcfile, name="pico2joy"):
+        self.base = base.rstrip("/")
+        self.port = port
+        self.rcfile = os.path.expanduser(rcfile)
+        self.name = name
+        self.lock = threading.Lock()          # the cache, between the reader and the relay
+        self.post_lock = threading.Lock()     # one POST at a time per session
+        self.sid = None
+        self.token = None
+        self.ping_interval = 25.0
+        self.connected = False                # socket.io session up and authorised
+        self.joined = False                   # in the port's room, getting its events
+        self.rejoin_at = 0.0
+        self.status = {}
+        self.settings = {}
+        self.workflow = "idle"
+        self.error = None
+        self.stopping = False
+        threading.Thread(target=self._run, name="cncjs", daemon=True).start()
+        threading.Thread(target=self._keepalive, name="cncjs-ping", daemon=True).start()
+
+    def _make_token(self):
+        """An HS256 JWT signed with CNCJS's own secret: what its web UI gets by
+        signing in, minted here instead because this runs as the user CNCJS
+        runs as, and a CNCJS with no users configured accepts any signed token."""
+        with open(self.rcfile) as handle:
+            secret = json.load(handle)["secret"]
+
+        def part(data):
+            raw = json.dumps(data, separators=(",", ":")).encode()
+            return base64.urlsafe_b64encode(raw).rstrip(b"=")
+
+        now = int(time.time())
+        signing = part({"alg": "HS256", "typ": "JWT"}) + b"." + part(
+            {"id": "", "name": self.name, "iat": now, "exp": now + 86400})
+        signature = hmac.new(secret.encode(), signing, hashlib.sha256).digest()
+        return (signing + b"." + base64.urlsafe_b64encode(signature).rstrip(b"=")).decode()
+
+    def _url(self):
+        query = {"EIO": "3", "transport": "polling", "b64": "1",
+                 "t": "%d" % (time.time() * 1000)}
+        if self.sid:
+            query["sid"] = self.sid
+        else:
+            query["token"] = self.token
+        return "%s/socket.io/?%s" % (self.base, urllib.parse.urlencode(query))
+
+    @staticmethod
+    def decode(payload):
+        """Split an engine.io 3 polling payload into its packets."""
+        packets, index = [], 0
+        while index < len(payload):
+            colon = payload.index(":", index)
+            want, index = int(payload[index:colon]), colon + 1
+            start, units = index, 0
+            while units < want and index < len(payload):
+                units += 2 if ord(payload[index]) > 0xFFFF else 1
+                index += 1
+            packets.append(payload[start:index])
+        return packets
+
+    def _post(self, packet):
+        if not self.sid:
+            raise OSError("cncjs is not connected")
+        data = ("%d:%s" % (utf16_len(packet), packet)).encode()
+        request = urllib.request.Request(
+            self._url(), data=data, headers={"Content-Type": "text/plain;charset=UTF-8"})
+        with self.post_lock, urllib.request.urlopen(request, timeout=5.0) as response:
+            response.read()
+
+    def emit(self, name, *args):
+        self._post("42" + json.dumps([name] + list(args), separators=(",", ":")))
+
+    def command(self, cmd, *args):
+        """A CNCJS controller command: `gcode`, `homing`, `feedhold`, ..."""
+        self.emit("command", self.port, cmd, *args)
+
+    def snapshot(self):
+        with self.lock:
+            return dict(self.status), dict(self.settings), self.workflow, self.joined
+
+    def close(self):
+        """Leave, politely. Never `close` the port: that would close it for the
+        browser and everyone else too."""
+        self.stopping = True
+        try:
+            self._post("1")
+        except OSError:
+            pass
+
+    def _run(self):
+        backoff = 1.0
+        while not self.stopping:
+            try:
+                self._session()
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+                # urllib's errors, timeouts included, are all OSError; the rest
+                # are CNCJS saying something shaped unlike what this expects,
+                # which must cost a reconnect rather than the reader thread.
+                if str(error) != self.error:
+                    self.error = str(error)
+                    log("cncjs: %s" % error)
+            else:
+                backoff = 1.0
+            with self.lock:
+                self.sid = None
+                self.connected = self.joined = False
+                self.status = {}
+            if self.stopping:
+                return
+            time.sleep(backoff)
+            backoff = min(backoff * 2.0, 30.0)
+
+    def _session(self):
+        self.sid = None
+        self.token = self._make_token()
+        while not self.stopping:
+            # Long-polls: CNCJS answers as soon as it has something, or sends a
+            # noop within the ping interval.
+            url = self._url()
+            with urllib.request.urlopen(url, timeout=self.ping_interval + 20.0) as response:
+                payload = response.read().decode("utf-8")
+            for packet in self.decode(payload):
+                self._packet(packet)
+            if not self.sid:
+                raise ValueError("no engine.io handshake from %s" % self.base)
+
+    def _keepalive(self):
+        last_ping = 0.0
+        while not self.stopping:
+            time.sleep(1.0)
+            if not self.sid:
+                last_ping = 0.0
+                continue
+            now = time.time()
+            try:
+                if now - last_ping >= self.ping_interval * 0.8:
+                    last_ping = now
+                    self._post("2")
+                if self.connected and not self.joined and now >= self.rejoin_at:
+                    self.rejoin_at = now + 5.0
+                    self.emit("list")
+            except OSError:
+                pass          # a dead session is the reader's to notice and rebuild
+
+    def _packet(self, packet):
+        kind, body = packet[:1], packet[1:]
+        if kind == "0":
+            handshake = json.loads(body)
+            self.sid = handshake["sid"]
+            self.ping_interval = handshake.get("pingInterval", 25000) / 1000.0
+        elif kind == "1":
+            raise ValueError("cncjs closed the session")
+        elif kind == "4":
+            self._message(body)
+
+    def _message(self, body):
+        kind, rest = body[:1], body[1:]
+        if kind == "0":
+            with self.lock:
+                self.connected = True
+            self.error = None
+            log("cncjs: connected to %s, joining %s" % (self.base, self.port))
+            self.rejoin_at = time.time() + 5.0
+            self.emit("open", self.port, {"controllerType": "Grbl", "baudrate": 115200})
+        elif kind == "4":
+            # socketio-jwt turning the token down lands here.
+            raise ValueError("cncjs refused the connection: %s" % rest)
+        elif kind == "2":
+            event = json.loads(rest.lstrip("0123456789"))     # skip an ack id
+            if event:
+                self._event(event[0], event[1:])
+
+    def _event(self, name, args):
+        if name == "Grbl:state" and args:
+            with self.lock:
+                self.status = args[0].get("status") or {}
+        elif name == "Grbl:settings" and args:
+            with self.lock:
+                self.settings = args[0].get("settings") or {}
+        elif name == "workflow:state" and args:
+            with self.lock:
+                self.workflow = args[0]
+        elif name == "serialport:open":
+            with self.lock:
+                self.joined = True
+            log("cncjs: on %s" % self.port)
+        elif name == "serialport:close":
+            with self.lock:
+                self.joined = False
+                self.status = {}
+            self.rejoin_at = time.time() + 5.0
+            log("cncjs: %s was closed; waiting for someone to open it again" % self.port)
+        elif name == "serialport:list" and args:
+            if any(p.get("port") == self.port and p.get("inuse") for p in args[0]):
+                self.emit("open", self.port, {"controllerType": "Grbl", "baudrate": 115200})
+        elif name == "serialport:error" and args:
+            log("cncjs: port error %s" % (args[0],))
+
+
+class Carve:
+    """The relay for the X-Carve: GRBL's truth down to the puck, jogs back up.
+
+    The same bargain and the same coalescing as [`Gantry`], in GRBL's vocabulary.
+    What differs:
+
+    - Positions go down in *work* coordinates, the ones CNCJS shows and you zero,
+      and so do the limits: machine travel `[-$13x, 0]` shifted by the work
+      offset. The puck only needs position and limits in one frame, and this
+      way its numbers match the CNCJS screen.
+    - GRBL has no per-axis homed flag. With homing enabled it boots into Alarm
+      and stays there until `$H`, so "not in Alarm" is the nearest thing it has,
+      and all three axes share it. A machine unlocked with `$X` and never homed
+      passes that test while its limits mean nothing - and soft limits are off
+      on this machine, so nothing below the puck would catch it either. Home it.
+    - Jogs are GRBL 1.1 `$J=` moves, which leave the modal state alone: no
+      save-and-restore around them, and a job's G90 is never at risk.
+    """
+
+    def __init__(self, link, cnc, args):
+        self.link = link
+        self.cnc = cnc
+        self.args = args
+        self.limits = None
+        self.limits_sent = 0.0
+        self.sent_limits = None
+        self.active = ""
+        self.state = 0
+        self.homed = False
+        self.workflow = "idle"
+        self.position = [0.0, 0.0, 0.0]
+        self.queued = [0, 0, 0]
+        self.queued_since = 0.0
+        self.queued_count = 0
+
+    def poll(self):
+        """Read CNCJS's latest word. False while there is no machine to describe."""
+        status, settings, self.workflow, joined = self.cnc.snapshot()
+        wpos, wco = status.get("wpos") or {}, status.get("wco") or {}
+        self.active = status.get("activeState", "")
+        if not joined or not self.active or not wpos:
+            return False
+        # $13=1 has GRBL report in inches; its travel settings stay millimetres.
+        scale = 25.4 if settings.get("$13") == "1" else 1.0
+        self.position = [float(wpos.get(axis, 0)) * scale for axis in AXES]
+        offset = [float(wco.get(axis, 0)) * scale for axis in AXES]
+        self.state = GRBL_STATES.get(self.active, 0)
+        # A job paused between lines can leave GRBL itself Idle.
+        if self.workflow == "running":
+            self.state = 2
+        elif self.workflow == "paused" and self.state != 4:
+            self.state = 3
+        self.homed = self.active != "Alarm"
+        try:
+            travel = [float(settings["$13%d" % index]) for index in range(3)]
+        except (KeyError, ValueError):
+            travel = None
+        if travel:
+            self.limits = [(um(-travel[i] - offset[i]), um(-offset[i])) for i in range(3)]
+        return True
+
+    def push(self, now):
+        # Limits first: after a re-zero the puck should clamp in the new frame
+        # before it sees a position in it.
+        if self.limits and (self.limits != self.sent_limits or now - self.limits_sent > 5.0):
+            self.limits_sent, self.sent_limits = now, self.limits
+            flat = []
+            for low, high in self.limits:
+                flat += [low, high]
+            self.link.send("#xl " + " ".join(str(v) for v in flat))
+        self.link.send("#xs %d %d %d %d %d" % (
+            um(self.position[0]), um(self.position[1]), um(self.position[2]),
+            0b111 if self.homed else 0, self.state))
+
+    def describe(self):
+        return "%s, work X%.3f Y%.3f Z%.3f" % (self.active, *self.position)
+
+    def handle(self, line):
+        fields = line[1:].split()
+        if not fields:
+            return
+        if fields[0] == "xj":
+            self.jog(fields[1:])
+        elif fields[0] == "xc":
+            self.command(fields[1:])
+
+    def jog(self, fields):
+        """Take a jog request. It goes out on the next flush, not now."""
+        try:
+            axis_index, delta_um = int(fields[0]), int(fields[1])
+        except (IndexError, ValueError):
+            log("bad jog: %r" % (fields,))
+            return
+        if axis_index not in (0, 1, 2) or delta_um == 0:
+            return
+        axis = AXES[axis_index]
+        # GRBL only takes a jog from Idle or mid-jog, and a job that is paused
+        # expects to find the head where it left it.
+        if self.workflow != "idle" or self.state != 1:
+            log("refused jog %s: %s" % (
+                axis.upper(), self.active if self.workflow == "idle" else "job " + self.workflow))
+            return
+        if not self.queued_count:
+            self.queued_since = time.time()
+        self.queued[axis_index] += delta_um
+        self.queued_count += 1
+
+    def flush_jogs(self, now):
+        """Send everything queued as one `$J=` move, once it has had time to gather."""
+        if not self.queued_count or now - self.queued_since < self.args.jog_interval:
+            return
+
+        pending, count = self.queued, self.queued_count
+        self.queued, self.queued_count = [0, 0, 0], 0
+
+        moves = []
+        for axis_index, delta_um in enumerate(pending):
+            if delta_um == 0:
+                continue
+            axis = AXES[axis_index]
+            if self.limits:
+                low, high = self.limits[axis_index]
+                target = um(self.position[axis_index]) + delta_um
+                if target < low or target > high:
+                    log("refused jog %s: %.2f outside %.2f..%.2f"
+                        % (axis.upper(), target / 1000.0, low / 1000.0, high / 1000.0))
+                    continue
+            moves.append((axis, delta_um / 1000.0))
+        if not moves:
+            return
+
+        feed = min(CARVE_FEED[axis] for axis, _ in moves)
+        travel = " ".join("%s%.3f" % (axis.upper(), delta) for axis, delta in moves)
+        try:
+            self.cnc.command("gcode", "$J=G91 G21 %s F%.0f" % (travel, feed))
+            log("jog %s%s" % (travel, "" if count == 1 else " (%d requests)" % count))
+        except OSError as error:
+            log("jog %s failed: %s" % (travel, error))
+
+    def command(self, fields):
+        name = fields[0] if fields else ""
+        if name == "home":
+            if self.workflow != "idle":
+                log("refused home: job %s" % self.workflow)
+                return
+            command, spelled = "homing", "$H"
+        elif name == "stop":
+            # A feed hold, not a reset: it stops the machine without throwing
+            # away where GRBL thinks the head is.
+            command, spelled = "feedhold", "feed hold"
+        else:
+            log("unknown command %r" % name)
+            return
+        log("command %s -> %s" % (name, spelled))
+        try:
+            self.cnc.command(command)
+        except OSError as error:
+            log("%s failed: %s" % (name, error))
+
 
 # --------------------------------------------------------------------------
 # flashing
@@ -889,6 +1295,9 @@ def run_relay(args, only=None):
     need_gantry = only in (None, "gantry")
     need_media = only in (None, "music")
     need_quota = only in (None, "quota")
+    # Opt-in on the relay: only the machine next to the X-Carve has a CNCJS to
+    # talk to and the secret to talk to it with.
+    need_xcarve = only == "xcarve" or (only is None and getattr(args, "cncjs", None))
 
     tunnel = None
     printer = None
@@ -899,6 +1308,9 @@ def run_relay(args, only=None):
         printer = Moonraker(base, args.api_key)
     player = Player() if need_media else None
     subs = subscriptions(args) if need_quota else []
+    # Started before the puck is found, so CNCJS is already connected - and its
+    # problems already logged - by the time there is a puck to show them on.
+    cnc = Cncjs(args.cncjs, args.cncjs_port, args.cncrc) if need_xcarve else None
 
     # Wait rather than exit: as a service this may start before the puck is
     # plugged in, and "no puck yet" is not a failure worth restarting over.
@@ -916,12 +1328,16 @@ def run_relay(args, only=None):
     gantry = Gantry(link, printer, args) if need_gantry else None
     media = Media(link, player, args) if need_media else None
     quota = Quota(link, subs, args) if need_quota else None
+    carve = Carve(link, cnc, args) if cnc else None
 
     by_view = {}
     owner = {}
     if gantry:
         by_view["gantry"] = gantry
         owner["j"] = owner["c"] = gantry
+    if carve:
+        by_view["xcarve"] = carve
+        owner["xj"] = owner["xc"] = carve
     if media:
         by_view["music"] = media
         owner["m"] = media
@@ -938,6 +1354,8 @@ def run_relay(args, only=None):
             media.link = new
         if quota:
             quota.link = new
+        if carve:
+            carve.link = new
 
     def resync():
         """Tell a puck everything again. What a fresh connection is owed."""
@@ -971,6 +1389,9 @@ def run_relay(args, only=None):
         if app is gantry:
             gantry.limits_sent = 0.0
             log("relay: gantry")
+        elif app is carve:
+            carve.limits_sent, carve.sent_limits = 0.0, None
+            log("relay: xcarve")
         elif app is media:
             media.last = media.last_art_url = None
             log("relay: music")
@@ -982,7 +1403,8 @@ def run_relay(args, only=None):
             log("relay: quota")
 
     # A dict so the nested handlers can rebind it without `nonlocal` gymnastics.
-    state = {"active": by_view.get(only) if only else None, "moonraker_ok": None}
+    state = {"active": by_view.get(only) if only else None, "moonraker_ok": None,
+             "cncjs_ok": None}
 
     def route(line):
         if not line.startswith("#"):
@@ -1020,6 +1442,8 @@ def run_relay(args, only=None):
         log("relay: %s, following the puck's view" % link.name)
     if printer:
         log("moonraker at %s" % printer.base)
+    if cnc:
+        log("cncjs at %s, port %s" % (cnc.base, cnc.port))
     if not only:
         try:
             link.send("#?")                 # which view is up right now?
@@ -1035,7 +1459,7 @@ def run_relay(args, only=None):
     # A second is plenty: this only pushes the numbers the worker thread already
     # has, and the puck ticks the countdown itself between them.
     q_period = 1.0
-    next_g = next_m = next_q = 0.0
+    next_g = next_m = next_q = next_x = 0.0
 
     try:
         while True:
@@ -1073,6 +1497,20 @@ def run_relay(args, only=None):
                         log("puck write failed (%s); reopening" % error)
                         if not reopen():
                             continue
+            elif active is carve and now >= next_x:
+                next_x = now + g_period
+                # No request here: CNCJS pushes, and this reads what it pushed.
+                ok = carve.poll()
+                if ok != state["cncjs_ok"]:
+                    state["cncjs_ok"] = ok
+                    log("xcarve: %s" % (carve.describe() if ok else "no machine state from cncjs"))
+                if ok:
+                    try:
+                        carve.push(now)
+                    except OSError as error:
+                        log("puck write failed (%s); reopening" % error)
+                        if not reopen():
+                            continue
             elif active is media and now >= next_m:
                 next_m = now + m_period
                 try:
@@ -1099,12 +1537,16 @@ def run_relay(args, only=None):
 
             if gantry:
                 gantry.flush_jogs(time.time())
+            if carve:
+                carve.flush_jogs(time.time())
     except KeyboardInterrupt:
         log("stopped")
     finally:
         link.close()
         if tunnel:
             tunnel.terminate()
+        if cnc:
+            cnc.close()
     return 0
 
 
@@ -1116,6 +1558,11 @@ def cmd_relay(args):
 def cmd_gantry(args):
     """Drive the gantry only: a relay pinned to the gantry app."""
     return run_relay(args, only="gantry")
+
+
+def cmd_xcarve(args):
+    """Drive the X-Carve only: a relay pinned to the xcarve app."""
+    return run_relay(args, only="xcarve")
 
 
 # --------------------------------------------------------------------------
@@ -1971,10 +2418,21 @@ def main():
                          help="how long to gather jogs before sending them as one move"
                               " (default: %(default)s)")
 
+    def add_xcarve_opts(sub, url):
+        sub.add_argument("--cncjs", default=url, metavar="URL",
+                         help="CNCJS base URL (default: %s)" % (url or "off"))
+        sub.add_argument("--cncjs-port", default="/dev/ttyUSB0",
+                         help="the X-Controller's serial port, spelled as CNCJS spells it"
+                              " (default: %(default)s)")
+        sub.add_argument("--cncrc", default="~/.cncrc",
+                         help="CNCJS's config file, for the secret its tokens are signed"
+                              " with (default: %(default)s)")
+
     relay = subparsers.add_parser(
         "relay", help="own the link and follow the puck's view (gantry, music, quota)")
     add_gantry_opts(relay)
     add_quota_opts(relay)
+    add_xcarve_opts(relay, None)
     relay.add_argument("--rate", type=float, default=8.0, help="gantry state updates per second")
     relay.add_argument("--wait-for-puck", action="store_true",
                        help="sit and retry until the puck turns up (for running as a service)")
@@ -1986,6 +2444,16 @@ def main():
     gantry.add_argument("--wait-for-puck", action="store_true",
                         help="sit and retry until the puck turns up (for running as a service)")
     gantry.set_defaults(run=cmd_gantry)
+
+    xcarve = subparsers.add_parser("xcarve", help="drive the X-Carve with the knob, through CNCJS")
+    add_xcarve_opts(xcarve, "http://127.0.0.1:8000")
+    xcarve.add_argument("--jog-interval", type=float, default=0.12, metavar="SECONDS",
+                        help="how long to gather jogs before sending them as one move"
+                             " (default: %(default)s)")
+    xcarve.add_argument("--rate", type=float, default=8.0, help="state updates per second")
+    xcarve.add_argument("--wait-for-puck", action="store_true",
+                        help="sit and retry until the puck turns up (for running as a service)")
+    xcarve.set_defaults(run=cmd_xcarve)
 
     spotify = subparsers.add_parser("spotify", help="control the active player from the puck")
     spotify.add_argument("--rate", type=float, default=4.0, help="polls per second")
