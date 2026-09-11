@@ -306,13 +306,13 @@ const VOLUME_EDGES: [(usize, usize); 12] = [
 ];
 
 /// Where the head sits in its travel, per axis, as 0..1.
-fn head_unit() -> [f32; 3] {
+fn head_unit(machine: &crate::gantry::Machine) -> [f32; 3] {
     let mut unit = [0.0f32; 3];
     for axis in 0..crate::gantry::AXES {
-        let (min, max) = crate::gantry::limits(axis);
+        let (min, max) = machine.limits(axis);
         let span = (max - min) as f32;
         if span > 0.0 {
-            let along = (crate::gantry::position(axis) - min) as f32 / span;
+            let along = (machine.position(axis) - min) as f32 / span;
             unit[axis] = if along < 0.0 {
                 0.0
             } else if along > 1.0 {
@@ -325,8 +325,8 @@ fn head_unit() -> [f32; 3] {
     unit
 }
 
-/// The gantry screen: the build volume in isometric with the printhead where
-/// the printer says it is, and the exact numbers a double-tap away.
+/// A machine screen, printer or X-Carve: the travel volume in isometric with the
+/// head where the machine says it is, and the exact numbers a double-tap away.
 ///
 /// Everything here is the host's truth - see [`crate::gantry`] - so an unhomed
 /// machine gets an empty frame rather than a head drawn where nobody knows it
@@ -334,6 +334,7 @@ fn head_unit() -> [f32; 3] {
 /// on screen.
 pub fn draw_gantry(
     d: &mut Display<'_>,
+    machine: &crate::gantry::Machine,
     selected: usize,
     show_numbers: bool,
     millivolts: u16,
@@ -357,16 +358,11 @@ pub fn draw_gantry(
         .build();
 
     // Status row: what the printer is doing, and which axes know where they are.
-    let _ = Text::with_text_style(
-        crate::gantry::state_label(),
-        Point::new(2, 15),
-        small,
-        top_left,
-    )
-    .draw(d);
+    let _ =
+        Text::with_text_style(machine.state_label(), Point::new(2, 15), small, top_left).draw(d);
     for axis in 0..crate::gantry::AXES {
         let origin = Point::new(98 + 10 * axis as i32, 14);
-        let homed = crate::gantry::homed(axis);
+        let homed = machine.homed(axis);
         let _ = Rectangle::new(origin, Size::new(9, 11))
             .into_styled(if homed { fill } else { on })
             .draw(d);
@@ -386,10 +382,9 @@ pub fn draw_gantry(
             .draw(d);
     }
 
-    let known =
-        crate::gantry::online() && (0..crate::gantry::AXES).all(crate::gantry::homed);
+    let known = machine.online() && (0..crate::gantry::AXES).all(|axis| machine.homed(axis));
     if known {
-        let unit = head_unit();
+        let unit = head_unit(machine);
         let head = iso(unit);
         let below = iso([unit[0], unit[1], 0.0]);
 
@@ -411,7 +406,7 @@ pub fn draw_gantry(
             .into_styled(fill)
             .draw(d);
     } else {
-        let missing = if crate::gantry::online() {
+        let missing = if machine.online() {
             "not homed"
         } else {
             "no bridge"
@@ -434,10 +429,10 @@ pub fn draw_gantry(
             let _ = write!(
                 first,
                 "X{} Y{}",
-                Millimetres(crate::gantry::position(0)),
-                Millimetres(crate::gantry::position(1))
+                Millimetres(machine.position(0)),
+                Millimetres(machine.position(1))
             );
-            let _ = write!(second, "Z{}", Millimetres(crate::gantry::position(2)));
+            let _ = write!(second, "Z{}", Millimetres(machine.position(2)));
         } else {
             let _ = write!(first, "X --.-- Y --.--");
             let _ = write!(second, "Z --.--");

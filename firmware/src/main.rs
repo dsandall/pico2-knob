@@ -125,7 +125,7 @@ const HELP: &str = concat!(
     "          w wireless | m menu (knob moves, 1/2/3 select, knob press exits)\r\n",
     "          1/2/3 select axis (Z/X/Y, as the buttons do) | , . jog it\r\n",
     "          cube: hold 1/2/3 to spin that axis, knob alone zooms\r\n",
-    "          gantry: 1/2/3 pick the axis, knob jogs it (needs the bridge)\r\n",
+    "          gantry, xcarve: 1/2/3 pick the axis, knob jogs it (needs the bridge)\r\n",
     "          quota: hold a button to re-check the plans | r does it here\r\n",
     "          l led (dark/dim/on) | v verbose | b bootloader (UF2)\r\n",
     "          #r uf2|serial|ota  reboot into a bootloader mode\r\n"
@@ -187,8 +187,8 @@ static BATT_MV: AtomicU16 = AtomicU16::new(0);
 static LINK_STATE: AtomicU8 = AtomicU8::new(0);
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 static MENU_SEL: AtomicU8 = AtomicU8::new(0);
-/// 0 = the cube, 1 = the real gantry, 2 = now playing, 3 = subscription quotas,
-/// 4 = the orientation pattern.
+/// 0 = the cube, 1 = the printer's gantry, 2 = the X-Carve, 3 = now playing,
+/// 4 = subscription quotas, 5 = the orientation pattern.
 ///
 /// The live input view and the all-pixels-on screen used to bracket these. Both
 /// were bring-up instruments rather than things to look at: the pips told you a
@@ -199,10 +199,11 @@ static MENU_SEL: AtomicU8 = AtomicU8::new(0);
 static VIEW: AtomicU8 = AtomicU8::new(0);
 const VIEW_CUBE: u8 = 0;
 const VIEW_GANTRY: u8 = 1;
-const VIEW_MUSIC: u8 = 2;
-const VIEW_QUOTA: u8 = 3;
-const VIEW_PATTERN: u8 = 4;
-const VIEWS: u8 = 5;
+const VIEW_XCARVE: u8 = 2;
+const VIEW_MUSIC: u8 = 3;
+const VIEW_QUOTA: u8 = 4;
+const VIEW_PATTERN: u8 = 5;
+const VIEWS: u8 = 6;
 /// Gantry zoom, in detents off the resting size - see [`cube::zoom_scale`].
 static ZOOM: AtomicI32 = AtomicI32::new(0);
 /// Whether the gantry screen spells its positions out. The frame shows you
@@ -284,10 +285,22 @@ pub fn link_short() -> &'static str {
     }
 }
 
+/// The machine a view drives, if it drives one. Both machine screens are the
+/// same screen - see [`gantry::Machine`] - so everything that treats them alike
+/// goes through here rather than naming either.
+fn machine(view: u8) -> Option<&'static gantry::Machine> {
+    match view {
+        VIEW_GANTRY => Some(&gantry::GANTRY),
+        VIEW_XCARVE => Some(&gantry::XCARVE),
+        _ => None,
+    }
+}
+
 pub fn view_label() -> &'static str {
     match VIEW.load(Ordering::Relaxed) {
         VIEW_CUBE => "cube",
         VIEW_GANTRY => "gantry",
+        VIEW_XCARVE => "xcarve",
         VIEW_MUSIC => "music",
         VIEW_QUOTA => "quota",
         VIEW_PATTERN => "pattern",
@@ -789,17 +802,17 @@ async fn main(_spawner: embassy_executor::Spawner) {
                                     (VIEW_CUBE, some) => some,
                                     _ => Some(AXIS.load(Ordering::Relaxed) as usize % 3),
                                 };
-                                match axis {
-                                    // The real machine: the knob asks the printer to
-                                    // move, and the screen only changes once it says
-                                    // it did.
-                                    Some(axis) if view == VIEW_GANTRY => {
-                                        if gantry::can_jog(axis) {
+                                match (axis, machine(view)) {
+                                    // The real machine: the knob asks it to move,
+                                    // and the screen only changes once it says it
+                                    // did.
+                                    (Some(axis), Some(machine)) => {
+                                        if machine.can_jog(axis) {
                                             // One detent is worth more when the
                                             // knob is moving - see [`accel`].
                                             let steps = accel::steps_for(rate);
                                             gantry::note_gain(steps);
-                                            let delta = gantry::jog(axis, direction * steps);
+                                            let delta = machine.jog(axis, direction * steps);
                                             logln!(
                                                 "jog {} {} mm",
                                                 ui::AXIS_NAMES[axis],
@@ -809,17 +822,17 @@ async fn main(_spawner: embassy_executor::Spawner) {
                                             logln!(
                                                 "jog {} refused: {}",
                                                 ui::AXIS_NAMES[axis],
-                                                if !gantry::online() {
+                                                if !machine.online() {
                                                     "no bridge"
-                                                } else if !gantry::homed(axis) {
+                                                } else if !machine.homed(axis) {
                                                     "not homed"
                                                 } else {
-                                                    "printing"
+                                                    machine.busy_label()
                                                 }
                                             );
                                         }
                                     }
-                                    Some(axis) => {
+                                    (Some(axis), None) => {
                                         // The knob's real job: jog the chosen axis.
                                         let jogged = AXIS_COUNTS[axis]
                                             .fetch_add(direction, Ordering::Relaxed)
@@ -830,7 +843,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
                                             ui::AXIS_NAMES[axis]
                                         );
                                     }
-                                    None => {
+                                    (None, _) => {
                                         let zoom = (ZOOM.load(Ordering::Relaxed) + direction)
                                             .clamp(cube::ZOOM_MIN, cube::ZOOM_MAX);
                                         ZOOM.store(zoom, Ordering::Relaxed);
@@ -856,7 +869,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     // one you will hold.
                     if held[i] == HOLD_TICKS && !MENU_OPEN.load(Ordering::Relaxed) {
                         match VIEW.load(Ordering::Relaxed) {
-                            VIEW_GANTRY if !WHEEL_OPEN.load(Ordering::Relaxed) => {
+                            VIEW_GANTRY | VIEW_XCARVE if !WHEEL_OPEN.load(Ordering::Relaxed) => {
                                 WHEEL_SEL.store(gantry::step_index() as u8, Ordering::Relaxed);
                                 WHEEL_OPEN.store(true, Ordering::Relaxed);
                                 logln!("wheel: open");
@@ -928,7 +941,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
                             logln!("axis: {}", ui::AXIS_NAMES[axis]);
 
                             // Double-tap any of them to show or hide the numbers.
-                            if VIEW.load(Ordering::Relaxed) == VIEW_GANTRY
+                            if machine(VIEW.load(Ordering::Relaxed)).is_some()
                                 && ticks.wrapping_sub(last_press[i]) < DOUBLE_TAP_TICKS
                             {
                                 let on = !GANTRY_NUMBERS.fetch_xor(true, Ordering::Relaxed);
@@ -992,18 +1005,20 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     counts[1],
                     counts[2]
                 );
-                // The machine as the bridge last described it, or "offline".
-                logln!(
-                    "gantry {} | X{} Y{} Z{} | homed {}{}{} | step {} mm",
-                    gantry::state_label(),
-                    ui::Millimetres(gantry::position(0)),
-                    ui::Millimetres(gantry::position(1)),
-                    ui::Millimetres(gantry::position(2)),
-                    if gantry::homed(0) { 'x' } else { '-' },
-                    if gantry::homed(1) { 'y' } else { '-' },
-                    if gantry::homed(2) { 'z' } else { '-' },
-                    ui::Millimetres(gantry::step_um())
-                );
+                // Each machine as its bridge last described it, or "offline".
+                for (name, machine) in [("gantry", &gantry::GANTRY), ("xcarve", &gantry::XCARVE)] {
+                    logln!(
+                        "{name} {} | X{} Y{} Z{} | homed {}{}{} | step {} mm",
+                        machine.state_label(),
+                        ui::Millimetres(machine.position(0)),
+                        ui::Millimetres(machine.position(1)),
+                        ui::Millimetres(machine.position(2)),
+                        if machine.homed(0) { 'x' } else { '-' },
+                        if machine.homed(1) { 'y' } else { '-' },
+                        if machine.homed(2) { 'z' } else { '-' },
+                        ui::Millimetres(gantry::step_um())
+                    );
+                }
             }
 
             // Heartbeat.
@@ -1148,9 +1163,13 @@ async fn main(_spawner: embassy_executor::Spawner) {
             let zoom = ZOOM.load(Ordering::Relaxed);
             let held = held_axis(&state.pressed);
 
-            // Anything the knob asked the printer for goes out as one move per
+            // Anything the knob asked a machine for goes out as one move per
             // frame, however fast it was turned.
-            gantry::flush_jogs();
+            gantry::GANTRY.flush_jogs();
+            gantry::XCARVE.flush_jogs();
+            // Whichever machine is on screen - or the printer when neither is,
+            // since the redraw key below only needs *a* machine to watch.
+            let shown = machine(view).unwrap_or(&gantry::GANTRY);
 
             // Every jog since the last frame is a kick of torque. Sample the
             // deltas whatever view is up, so switching to the gantry doesn't
@@ -1176,15 +1195,15 @@ async fn main(_spawner: embassy_executor::Spawner) {
                 counts,
                 axis,
                 zoom,
-                // The gantry screen is a view of the host's state, so it has to
+                // A machine screen is a view of the host's state, so it has to
                 // redraw when that changes and not when the puck's own does.
                 (
-                    gantry::position(0),
-                    gantry::position(1),
-                    gantry::position(2),
-                    gantry::state_label(),
+                    shown.position(0),
+                    shown.position(1),
+                    shown.position(2),
+                    shown.state_label(),
                     gantry::step_um(),
-                    gantry::homed(0) as u8 | (gantry::homed(1) as u8) << 1 | (gantry::homed(2) as u8) << 2,
+                    shown.homed(0) as u8 | (shown.homed(1) as u8) << 1 | (shown.homed(2) as u8) << 2,
                     GANTRY_NUMBERS.load(Ordering::Relaxed),
                     WHEEL_OPEN.load(Ordering::Relaxed),
                     WHEEL_SEL.load(Ordering::Relaxed),
@@ -1228,13 +1247,16 @@ async fn main(_spawner: embassy_executor::Spawner) {
                         zoom,
                         state.millivolts,
                     ),
-                    (false, VIEW_GANTRY) if WHEEL_OPEN.load(Ordering::Relaxed) => ui::draw_wheel(
+                    (false, VIEW_GANTRY | VIEW_XCARVE) if WHEEL_OPEN.load(Ordering::Relaxed) => {
+                        ui::draw_wheel(
+                            &mut screen,
+                            WHEEL_SEL.load(Ordering::Relaxed) as usize,
+                            state.millivolts,
+                        )
+                    }
+                    (false, VIEW_GANTRY | VIEW_XCARVE) => ui::draw_gantry(
                         &mut screen,
-                        WHEEL_SEL.load(Ordering::Relaxed) as usize,
-                        state.millivolts,
-                    ),
-                    (false, VIEW_GANTRY) => ui::draw_gantry(
-                        &mut screen,
+                        shown,
                         axis,
                         GANTRY_NUMBERS.load(Ordering::Relaxed),
                         state.millivolts,
@@ -1402,8 +1424,12 @@ fn activate_menu_item() {
             let profile = accel::next_profile();
             logln!("menu: jog accel {profile}");
         }
+        // Home whichever machine is on screen; from anywhere else, the printer,
+        // which is what this row always meant.
         ui::MenuItem::Home => {
-            gantry::request("home");
+            machine(VIEW.load(Ordering::Relaxed))
+                .unwrap_or(&gantry::GANTRY)
+                .request("home");
             logln!("menu: asked the bridge to home");
         }
         // Nothing to activate: the row is the reading.
@@ -1664,9 +1690,10 @@ fn machine_line(line: &str) {
         _ => {
             // Each app claims its own message types and passes on the rest, so
             // the order here only decides who is asked first, never who wins.
-            if !media::handle_line(line) && !quota::handle_line(line) {
-                gantry::handle_line(line);
-            }
+            let _ = media::handle_line(line)
+                || quota::handle_line(line)
+                || gantry::XCARVE.handle_line(line)
+                || gantry::GANTRY.handle_line(line);
         }
     }
 }
