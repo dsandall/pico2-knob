@@ -42,6 +42,7 @@ import glob
 import hashlib
 import hmac
 import json
+import math
 import os
 import queue
 import select
@@ -908,9 +909,17 @@ class Carve:
         self.wcs = ""
         self.resolution_um = 0
         self.position = [0.0, 0.0, 0.0]
+        self.accel = [500.0, 500.0, 50.0]     # $120..$122, mm/s^2, until CNCJS says
         self.queued = [0, 0, 0]
         self.queued_since = 0.0
         self.queued_count = 0
+        self.last_request = 0.0
+        # Pacing: when the machine should finish what it has been sent, by this
+        # side's own reckoning (see `flush_jogs`), and the last move sent.
+        self.busy_until = 0.0
+        self.last_sent = 0.0
+        self.last_move = None
+        self.dropped = False
 
     def poll(self):
         """Read CNCJS's latest word. False while there is no machine to describe."""
@@ -930,6 +939,10 @@ class Carve:
         elif self.workflow == "paused" and self.state != 4:
             self.state = 3
         self.homed = self.active != "Alarm"
+        try:
+            self.accel = [float(settings["$12%d" % index]) for index in range(3)]
+        except (KeyError, ValueError):
+            pass
         try:
             travel = [float(settings["$13%d" % index]) for index in range(3)]
         except (KeyError, ValueError):
@@ -991,14 +1004,64 @@ class Carve:
             log("refused jog %s: %s" % (
                 axis.upper(), self.active if self.workflow == "idle" else "job " + self.workflow))
             return
+        now = time.time()
         if not self.queued_count:
-            self.queued_since = time.time()
+            self.queued_since = now
+        self.last_request = now
         self.queued[axis_index] += delta_um
         self.queued_count += 1
+        # Never gather more than the machine could cover by the time it goes out.
+        # A knob spun faster than the gantry otherwise banks travel, and the head
+        # keeps going after the hand stops: the overshoot. Past this the knob is a
+        # speed, not a distance, and the surplus is dropped. A lone detent is
+        # always taken whole, however big its step.
+        cap = int(CARVE_FEED[axis] / 60.0 * (self.args.jog_interval + self.args.jog_lead) * 1000)
+        if self.queued_count > 1 and abs(self.queued[axis_index]) > cap:
+            self.queued[axis_index] = cap if self.queued[axis_index] > 0 else -cap
+            self.dropped = True
+
+    def move_time(self, moves, feed):
+        """How long GRBL takes over a `$J=` move: a trapezoid, or only its cruise
+        when it carries straight on from the last one (the planner blends them)."""
+        distance = math.sqrt(sum(delta * delta for _, delta in moves))
+        speed = feed / 60.0
+        accel = min(self.accel[AXES.index(axis)] for axis, _ in moves)
+        signs = [(axis, delta > 0) for axis, delta in moves]
+        if self.last_move == signs and self.busy_until > time.time():
+            return distance / speed
+        if distance < speed * speed / accel:
+            return 2.0 * math.sqrt(distance / accel)
+        return distance / speed + speed / accel
 
     def flush_jogs(self, now):
-        """Send everything queued as one `$J=` move, once it has had time to gather."""
-        if not self.queued_count or now - self.queued_since < self.args.jog_interval:
+        """Send everything queued as one `$J=` move, once it has had time to gather,
+        and only while the machine is less than `--jog-lead` behind.
+
+        GRBL finishes every jog it has been sent, so whatever sits in its planner
+        when the hand stops still runs. Holding the lead short keeps that small;
+        and if the knob was spun hard enough to drop ticks it was being used as a
+        speed, so stopping it cancels the rest (`0x85`) and the head decelerates
+        where it is. A knob that never outran the machine gets every detent."""
+        if self.active == "Idle" and now - self.last_sent > 0.3:
+            self.busy_until = min(self.busy_until, now)
+        if (self.dropped and now - self.last_request > self.args.jog_stop
+                and self.busy_until > now):
+            try:
+                self.cnc.command("jogCancel")
+                log("jog cancelled: knob stopped %.1f s ahead of the machine"
+                    % (self.busy_until - now))
+            except OSError as error:
+                log("jog cancel failed: %s" % error)
+            self.busy_until, self.last_move, self.dropped = now, None, False
+            self.queued, self.queued_count = [0, 0, 0], 0
+            return
+        if not self.queued_count:
+            if now - self.last_request > self.args.jog_stop:
+                self.dropped = False
+            return
+        if now - self.queued_since < self.args.jog_interval:
+            return
+        if self.busy_until - now > self.args.jog_lead:
             return
 
         pending, count = self.queued, self.queued_count
@@ -1022,6 +1085,9 @@ class Carve:
 
         feed = min(CARVE_FEED[axis] for axis, _ in moves)
         travel = " ".join("%s%.3f" % (axis.upper(), delta) for axis, delta in moves)
+        self.busy_until = max(now, self.busy_until) + self.move_time(moves, feed)
+        self.last_move = [(axis, delta > 0) for axis, delta in moves]
+        self.last_sent = now
         try:
             self.cnc.command("gcode", "$J=G91 G21 %s F%.0f" % (travel, feed))
             log("jog %s%s" % (travel, "" if count == 1 else " (%d requests)" % count))
@@ -2507,6 +2573,12 @@ def main():
     xcarve.add_argument("--jog-interval", type=float, default=0.12, metavar="SECONDS",
                         help="how long to gather jogs before sending them as one move"
                              " (default: %(default)s)")
+    xcarve.add_argument("--jog-lead", type=float, default=0.15, metavar="SECONDS",
+                        help="the most the machine may be sent ahead of where it is, in time;"
+                             " what it still runs after the knob stops (default: %(default)s)")
+    xcarve.add_argument("--jog-stop", type=float, default=0.15, metavar="SECONDS",
+                        help="a knob quiet this long has stopped; a spin that outran the"
+                             " machine is then cancelled (default: %(default)s)")
     xcarve.add_argument("--rate", type=float, default=8.0, help="state updates per second")
     xcarve.add_argument("--wait-for-puck", action="store_true",
                         help="sit and retry until the puck turns up (for running as a service)")
