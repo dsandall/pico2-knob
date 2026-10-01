@@ -72,7 +72,8 @@ const STALE_MS: u32 = 1200;
 /// is one setting for the knob, whichever machine it is driving - it is a feel -
 /// but a machine can raise the finest to what it can actually move: see
 /// [`Machine::steps_um`].
-pub const STEPS_UM: [i32; 4] = [10, 100, 1_000, 10_000];
+pub const STEP_COUNT: usize = 5;
+pub const STEPS_UM: [i32; STEP_COUNT] = [10, 100, 1_000, 10_000, 50_000];
 static STEP: AtomicU8 = AtomicU8::new(1);
 
 pub fn step_index() -> usize {
@@ -145,7 +146,7 @@ impl Machine {
     /// The jog steps on offer here: [`STEPS_UM`], with any finer than the
     /// machine's floor raised to it. A detent that rounds to no motor step
     /// isn't a fine jog, it's a knob that sometimes does nothing.
-    pub fn steps_um(&self) -> [i32; 4] {
+    pub fn steps_um(&self) -> [i32; STEP_COUNT] {
         let floor = self.floor_um.load(Ordering::Relaxed);
         STEPS_UM.map(|step| step.max(floor))
     }

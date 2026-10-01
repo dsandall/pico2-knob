@@ -231,7 +231,7 @@ RESTORE_GCODE_STATE NAME=pico2joy_jog
 
 On the gantry screen **BTN1/2/3 are X/Y/Z** (not the cube's `BUTTON_AXIS` order),
 the knob jogs the selected axis by the step size from the menu (0.01 / 0.1 / 1 /
-10 mm), and `home all` in the menu sends `#c home`. Each axis shows its position,
+10 / 50 mm), and `home all` in the menu sends `#c home`. Each axis shows its position,
 its travel as a bar with the head's place in it, and dashes if it isn't homed.
 
 ## Driving the X-Carve

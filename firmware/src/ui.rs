@@ -290,9 +290,12 @@ pub fn draw_wheel(
         .alignment(Alignment::Center)
         .build();
 
-    // Four seats around the knob, clockwise from the top. Hard-coded rather
-    // than trigonometry: four points do not need `sinf`.
-    const SEATS: [(i32, i32); 4] = [(64, 44), (98, 72), (64, 100), (30, 72)];
+    // Five seats around the knob, clockwise from the top, a pentagon about
+    // (64, 72). Hard-coded rather than trigonometry: five points do not need
+    // `sinf`. The side seats sit high enough that a 5-character label clears
+    // the "jog step" caption, the bottom ones low enough to clear it too.
+    const SEATS: [(i32, i32); crate::gantry::STEP_COUNT] =
+        [(64, 40), (97, 60), (84, 100), (44, 100), (31, 60)];
     let steps = machine.steps_um();
 
     let _ = Text::with_text_style("jog step", Point::new(64, 72), small, centred).draw(d);
