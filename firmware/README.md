@@ -253,6 +253,20 @@ ssh rpi-xcarve.netbird.cloud 'python3 ~/pico2joy/pico2joy.py --link usb xcarve'
 
 `tools/pico2joy-xcarve.service` runs the same thing at boot.
 
+**Or through the pendant.** The X-Carve pendant (`xcarve_utils/pendant`, port
+8850 on the same Pi) opens the serial port exclusively, so while it has the
+port CNCJS has nothing for the bridge to join. `--pendant URL` goes through the
+pendant's HTTP API instead — `/api/state`, `/api/jog`, `/api/cmd`, `/api/rt` —
+with the same jogs, zeroing and homing:
+
+```
+python3 ~/pico2joy/pico2joy.py --link usb xcarve --pendant http://127.0.0.1:8850
+```
+
+Keep it on the Pi: every jog is one HTTP request and every state update one
+poll, and on localhost those cost nothing, where a VPN hop puts its round trip
+on each detent.
+
 **CNCJS stays in charge of the machine.** It owns the X-Controller's serial port,
 and the bridge joins that connection the way a second browser tab does, so the
 CNCJS page and the puck work side by side. It doesn't take the port from anyone:

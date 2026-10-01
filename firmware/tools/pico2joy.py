@@ -667,6 +667,8 @@ class Cncjs:
     starting, or CNCJS restarting) opens a port nobody has open.
     """
 
+    kind = "cncjs"
+
     def __init__(self, base, port, rcfile, name="pico2joy"):
         self.base = base.rstrip("/")
         self.port = port
@@ -870,6 +872,130 @@ class Cncjs:
                 self.emit("open", self.port, {"controllerType": "Grbl", "baudrate": 115200})
         elif name == "serialport:error" and args:
             log("cncjs: port error %s" % (args[0],))
+
+
+class Pendant:
+    """The X-Carve pendant (xcarve_utils/pendant, port 8850) in place of CNCJS.
+
+    The pendant opens the X-Controller's serial port exclusively, so while it is
+    up CNCJS has no port and [`Cncjs`] has nothing to join. This goes through
+    the pendant's HTTP API instead: `GET /api/state` for GRBL's status, `$$`
+    settings and `$G` parser state, `POST /api/jog` for a `$J=` move,
+    `POST /api/cmd` for any other line and `POST /api/rt` for the real-time
+    bytes. Same `snapshot()` and `command()` as [`Cncjs`], so [`Carve`] never
+    knows which one it has.
+
+    State is polled on its own thread, `rate` times a second. The pendant asks
+    GRBL for a status report five times a second, so going faster than that
+    only re-reads the same report.
+    """
+
+    kind = "pendant"
+
+    def __init__(self, base, rate=10.0):
+        self.base = base.rstrip("/")
+        self.port = "?"
+        self.lock = threading.Lock()
+        self.view = None
+        self.error = None
+        self.stopping = False
+        self.period = 1.0 / rate
+        threading.Thread(target=self._run, name="pendant", daemon=True).start()
+
+    def _get(self, path):
+        with urllib.request.urlopen(self.base + path, timeout=3.0) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _post(self, path, body):
+        request = urllib.request.Request(
+            self.base + path, data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"})
+        # A refused line (a job running, nothing connected) is a 400 with the
+        # reason: urllib raises that as HTTPError, an OSError like the rest.
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            response.read()
+
+    def _run(self):
+        while not self.stopping:
+            started = time.time()
+            try:
+                view = self._get("/api/state")
+            except (OSError, ValueError) as error:
+                view = None
+                if str(error) != self.error:
+                    self.error = str(error)
+                    log("pendant: %s" % error)
+            else:
+                if self.error is not None:
+                    log("pendant: back at %s" % self.base)
+                    self.error = None
+            with self.lock:
+                self.view = view
+                if view:
+                    self.port = view.get("port") or "?"
+            time.sleep(max(0.0, self.period - (time.time() - started)))
+
+    def snapshot(self):
+        """Status, settings, workflow state, whether the pendant has the port,
+        and the active coordinate system - shaped the way [`Cncjs`] shapes them."""
+        with self.lock:
+            view = self.view
+        if not view or not view.get("connected"):
+            return {}, {}, "idle", False, ""
+        raw = view.get("status") or {}
+
+        def axes(values):
+            return dict(zip(AXES, values)) if values else {}
+
+        # `Hold:0`, `Door:1` carry a sub-state CNCJS strips; so does this.
+        status = {"activeState": (raw.get("state") or "").split(":")[0],
+                  "wpos": axes(raw.get("wpos")), "wco": axes(raw.get("wco"))}
+        settings = {"$" + key: value for key, value in (view.get("settings") or {}).items()}
+        job = view.get("job") or {}
+        job_state = job.get("state")
+        if job_state == "paused":
+            workflow = "paused"
+        elif job_state in ("running", "finishing", "error"):
+            workflow = "running"
+        else:
+            workflow = "idle"
+        wcs = ""
+        for word in (view.get("modal") or "").split():
+            if word in ("G54", "G55", "G56", "G57", "G58", "G59"):
+                wcs = word
+        return status, settings, workflow, True, wcs
+
+    def command(self, cmd, *args):
+        """The CNCJS controller commands [`Carve`] uses, in the pendant's words."""
+        if cmd == "gcode":
+            line = args[0].strip()
+            if line.upper().startswith("$J="):
+                body = {}
+                for word in line[3:].split():
+                    if word[0] in "XYZxyz":
+                        body[word[0].lower()] = float(word[1:])
+                    elif word[0] in "Ff":
+                        body["feed"] = float(word[1:])
+                self._post("/api/jog", body)
+            else:
+                self._post("/api/cmd", {"line": line})
+        elif cmd == "jogCancel":
+            self._post("/api/rt", {"what": "jogcancel"})
+        elif cmd == "homing":
+            self._post("/api/cmd", {"line": "$H"})
+        elif cmd == "unlock":
+            self._post("/api/cmd", {"line": "$X"})
+        elif cmd == "feedhold":
+            self._post("/api/rt", {"what": "hold"})
+        elif cmd == "cyclestart":
+            self._post("/api/rt", {"what": "resume"})
+        elif cmd == "reset":
+            self._post("/api/rt", {"what": "reset"})
+        else:
+            raise OSError("the pendant has no %r" % cmd)
+
+    def close(self):
+        self.stopping = True
 
 
 class Carve:
@@ -1419,8 +1545,9 @@ def run_relay(args, only=None):
     need_media = only in (None, "music")
     need_quota = only in (None, "quota")
     # Opt-in on the relay: only the machine next to the X-Carve has a CNCJS to
-    # talk to and the secret to talk to it with.
-    need_xcarve = only == "xcarve" or (only is None and getattr(args, "cncjs", None))
+    # talk to and the secret to talk to it with - or a pendant holding the port.
+    need_xcarve = only == "xcarve" or (only is None and (
+        getattr(args, "cncjs", None) or getattr(args, "pendant", None)))
 
     tunnel = None
     printer = None
@@ -1433,7 +1560,12 @@ def run_relay(args, only=None):
     subs = subscriptions(args) if need_quota else []
     # Started before the puck is found, so CNCJS is already connected - and its
     # problems already logged - by the time there is a puck to show them on.
-    cnc = Cncjs(args.cncjs, args.cncjs_port, args.cncrc) if need_xcarve else None
+    cnc = None
+    if need_xcarve:
+        if getattr(args, "pendant", None):
+            cnc = Pendant(args.pendant)
+        else:
+            cnc = Cncjs(args.cncjs, args.cncjs_port, args.cncrc)
 
     # Wait rather than exit: as a service this may start before the puck is
     # plugged in, and "no puck yet" is not a failure worth restarting over.
@@ -1566,7 +1698,7 @@ def run_relay(args, only=None):
     if printer:
         log("moonraker at %s" % printer.base)
     if cnc:
-        log("cncjs at %s, port %s" % (cnc.base, cnc.port))
+        log("%s at %s, port %s" % (cnc.kind, cnc.base, cnc.port))
     if not only:
         try:
             link.send("#?")                 # which view is up right now?
@@ -1626,7 +1758,8 @@ def run_relay(args, only=None):
                 ok = carve.poll()
                 if ok != state["cncjs_ok"]:
                     state["cncjs_ok"] = ok
-                    log("xcarve: %s" % (carve.describe() if ok else "no machine state from cncjs"))
+                    log("xcarve: %s" % (carve.describe() if ok
+                                        else "no machine state from " + cnc.kind))
                 if ok:
                     try:
                         carve.push(now)
@@ -2544,6 +2677,10 @@ def main():
     def add_xcarve_opts(sub, url):
         sub.add_argument("--cncjs", default=url, metavar="URL",
                          help="CNCJS base URL (default: %s)" % (url or "off"))
+        sub.add_argument("--pendant", metavar="URL",
+                         help="go through the X-Carve pendant (xcarve_utils/pendant) instead"
+                              " of CNCJS, e.g. http://127.0.0.1:8850 - it holds the serial"
+                              " port exclusively while it is up, so CNCJS can't")
         sub.add_argument("--cncjs-port", default="/dev/ttyUSB0",
                          help="the X-Controller's serial port, spelled as CNCJS spells it"
                               " (default: %(default)s)")
@@ -2568,7 +2705,8 @@ def main():
                         help="sit and retry until the puck turns up (for running as a service)")
     gantry.set_defaults(run=cmd_gantry)
 
-    xcarve = subparsers.add_parser("xcarve", help="drive the X-Carve with the knob, through CNCJS")
+    xcarve = subparsers.add_parser(
+        "xcarve", help="drive the X-Carve with the knob, through CNCJS or the pendant")
     add_xcarve_opts(xcarve, "http://127.0.0.1:8000")
     xcarve.add_argument("--jog-interval", type=float, default=0.12, metavar="SECONDS",
                         help="how long to gather jogs before sending them as one move"
