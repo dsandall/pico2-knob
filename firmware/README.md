@@ -267,6 +267,19 @@ Keep it on the Pi: every jog is one HTTP request and every state update one
 poll, and on localhost those cost nothing, where a VPN hop puts its round trip
 on each detent.
 
+**The plate survey from the puck** (pendant only). The pendant's Survey tab runs
+an N-point touch-plate survey as a state machine: it parks the head over each
+point and waits for you to slide the plate under the bit. **Hold BTN3 (Z) for a
+second and let go without turning the knob**: if the pendant is waiting for the
+plate, that is Continue (it probes, lifts, moves to the next point); otherwise,
+from Idle, homed, no job, it is "probe here" — one probe at the current X Y,
+labelled `P1`, `P2`, … by the pendant. The hold is the step wheel's gesture, and
+it stays that: the wheel opens and closes on the same step, which is exactly
+what makes it free; turn the knob during the hold and it is a step change, not
+a probe. The relay's log is the readout — `SURVEY: waiting plate at FL (1/9)`,
+`SURVEY: probed P3 Z -81.689 (repeat 0.004)`, `survey: refused: …` — the OLED
+has no text row for it yet.
+
 **CNCJS stays in charge of the machine.** It owns the X-Controller's serial port,
 and the bridge joins that connection the way a second browser tab does, so the
 CNCJS page and the puck work side by side. It doesn't take the port from anyone:

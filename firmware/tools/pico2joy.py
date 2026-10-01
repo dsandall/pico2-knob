@@ -915,6 +915,28 @@ class Pendant:
         with urllib.request.urlopen(request, timeout=5.0) as response:
             response.read()
 
+    def post(self, path, body):
+        """A POST whose answer matters: the pendant's JSON, or an OSError that
+        carries the pendant's own refusal text rather than "HTTP Error 400"."""
+        request = urllib.request.Request(
+            self.base + path, data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=5.0) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            try:
+                why = json.loads(error.read().decode("utf-8")).get("error")
+            except (ValueError, OSError):
+                why = None
+            raise OSError(why or str(error))
+
+    def raw(self):
+        """The pendant's last /api/state as it came, for what [`Cncjs`] has no
+        word for: `homed`, and the plate survey's `zsurvey_seq`."""
+        with self.lock:
+            return self.view
+
     def _run(self):
         while not self.stopping:
             started = time.time()
@@ -1050,6 +1072,14 @@ class Carve:
         self.last_sent = 0.0
         self.last_move = None
         self.dropped = False
+        # The plate-survey gesture (see `console`): when BTN3 went down, the
+        # hold that is waiting for the wheel to report its step, the last step
+        # the puck told us, and the pendant's last survey state (to say what
+        # changed, once).
+        self.btn3_down = 0.0
+        self.hold_release = 0.0
+        self.step_mm = None
+        self.survey_seen = None
 
     def poll(self):
         """Read CNCJS's latest word. False while there is no machine to describe."""
@@ -1072,6 +1102,7 @@ class Carve:
         elif self.workflow == "paused" and self.state != 4:
             self.state = 3
         self.homed = self.active != "Alarm"
+        self.watch_survey()
         try:
             self.accel = [float(settings["$12%d" % index]) for index in range(3)]
         except (KeyError, ValueError):
@@ -1234,6 +1265,109 @@ class Carve:
             log("jog %s%s" % (travel, "" if count == 1 else " (%d requests)" % count))
         except OSError as error:
             log("jog %s failed: %s" % (travel, error))
+
+    # ---- the plate survey (the pendant's, see xcarve_utils/pendant/README.md) ----
+    #
+    # The pendant runs the survey as a state machine: it parks the head over a
+    # point and WAITS for the plate; Continue probes. On the puck every button
+    # already means something on the xcarve screen - BTN1/2/3 pick the axis, a
+    # double tap toggles the numbers, a one-second hold opens the step wheel,
+    # the knob is the menu - so the gesture here is the one that changes
+    # nothing: **hold BTN3 (Z) for a second and let go without turning**. The
+    # wheel opens and closes on the same step; the firmware logs
+    # "BTN3 down", "wheel: open", "BTN3 up", "wheel: step N mm", and that last
+    # line, with N unchanged, is the trigger. Turn the wheel during the hold
+    # and it was a step change, not a probe.
+
+    HOLD_S = 0.9            # the firmware's HOLD_TICKS is 1000 ms
+
+    def console(self, line):
+        """A human line from the puck (not `#`): the button edges and the wheel
+        report that make up the survey gesture. Everything else is ignored."""
+        text = line.split("] ", 1)[1] if line.startswith("[") and "] " in line else line
+        now = time.time()
+        if text == "BTN3 down":
+            self.btn3_down = now
+        elif text == "BTN3 up":
+            if self.btn3_down and now - self.btn3_down >= self.HOLD_S:
+                self.hold_release = now
+            self.btn3_down = 0.0
+        elif text.startswith("wheel: step ") or text.startswith("menu: jog step "):
+            try:
+                step = float(text.split("step ", 1)[1].split()[0])
+            except (IndexError, ValueError):
+                return
+            held = self.hold_release and now - self.hold_release < 0.5
+            self.hold_release = 0.0
+            if held and (self.step_mm is None or abs(step - self.step_mm) < 1e-6):
+                self.survey()
+            elif held:
+                log("survey: step changed to %g mm, not a probe" % step)
+            self.step_mm = step
+
+    def survey(self):
+        """Continue the pendant's survey if it is waiting for the plate; else
+        probe here (label P1, P2, ... from the pendant) from Idle, homed, no job."""
+        cnc = self.cnc
+        if not isinstance(cnc, Pendant):
+            log("survey: needs the pendant (--pendant URL), not CNCJS")
+            return
+        view = cnc.raw() or {}
+        seq = view.get("zsurvey_seq") or {}
+        try:
+            if seq.get("state") == "waiting":
+                cnc.post("/api/zsurvey/continue", {})
+                log("survey: continue -> probing %s (%d/%d)"
+                    % (seq.get("label"), seq.get("i", 0) + 1, seq.get("n", 0)))
+                return
+            if seq.get("active"):
+                log("survey: busy, %s %s" % (seq.get("state"), seq.get("label")))
+                return
+            if self.workflow != "idle":
+                log("survey: refused, job %s" % self.workflow)
+                return
+            if self.active != "Idle":
+                log("survey: refused, machine %s" % (self.active or "offline"))
+                return
+            if not view.get("homed"):
+                log("survey: refused, not homed")
+                return
+            answer = cnc.post("/api/zsurvey/probe_here", {})
+            log("survey: probing %s here" % (answer.get("seq") or {}).get("label"))
+        except OSError as error:
+            log("survey: refused: %s" % error)
+
+    def watch_survey(self):
+        """Say, once, what the pendant's survey did: waiting for the plate, a
+        point probed, stopped on an error. This is the puck's "display" for it -
+        the relay's log line - until the firmware has a text row for it."""
+        if not isinstance(self.cnc, Pendant):
+            return
+        seq = (self.cnc.raw() or {}).get("zsurvey_seq")
+        if not seq:
+            return
+        last = seq.get("last") or {}
+        key = (seq.get("state"), seq.get("i"), seq.get("t_state"), last.get("t"))
+        if key == self.survey_seen:
+            return
+        was = self.survey_seen
+        self.survey_seen = key
+        if was is None:
+            return                              # the relay just started: history, not news
+        state, label = seq.get("state"), seq.get("label")
+        # A probe and the next wait can land in one poll: say both, probe first.
+        if last and last.get("t") != was[3]:
+            log("SURVEY: probed %s Z %.3f (repeat %.3f)"
+                % (last.get("label"), last.get("mpos_z", 0.0), last.get("repeat") or 0.0))
+            if state == "done" and not seq.get("here"):
+                log("SURVEY: done, %d points" % len(seq.get("done") or []))
+        if state == "waiting" and (was[0] != "waiting" or was[1] != seq.get("i")):
+            log("SURVEY: waiting plate at %s (%d/%d) - hold Z to continue"
+                % (label, seq.get("i", 0) + 1, seq.get("n", 0)))
+        elif state == "error":
+            log("SURVEY: FAILED at %s: %s" % (label, seq.get("msg")))
+        elif state == "aborted":
+            log("SURVEY: aborted at %s (%s)" % (label, seq.get("msg")))
 
     def zero(self, fields):
         """Make the head's position the work zero on one axis.
@@ -1678,6 +1812,8 @@ def run_relay(args, only=None):
 
     def route(line):
         if not line.startswith("#"):
+            if carve is not None and line:
+                carve.console(line)         # the survey gesture lives in the button edges
             if getattr(args, "verbose", False) and line:
                 log("puck: %s" % line)
             return
