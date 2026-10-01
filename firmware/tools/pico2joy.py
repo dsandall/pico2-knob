@@ -951,11 +951,15 @@ class Pendant:
         status = {"activeState": (raw.get("state") or "").split(":")[0],
                   "wpos": axes(raw.get("wpos")), "wco": axes(raw.get("wco"))}
         settings = {"$" + key: value for key, value in (view.get("settings") or {}).items()}
+        # The pendant's job states: ready running paused error finishing done
+        # aborted alarm. It refuses a manual line itself in running / paused /
+        # finishing / error; `ready` is a job staged and about to stream, so
+        # that is a job too. The rest are over, and only GRBL's state matters.
         job = view.get("job") or {}
         job_state = job.get("state")
         if job_state == "paused":
             workflow = "paused"
-        elif job_state in ("running", "finishing", "error"):
+        elif job_state in ("ready", "running", "finishing", "error"):
             workflow = "running"
         else:
             workflow = "idle"
@@ -1053,6 +1057,9 @@ class Carve:
         wpos, wco = status.get("wpos") or {}, status.get("wco") or {}
         self.active = status.get("activeState", "")
         if not joined or not self.active or not wpos:
+            # No word from the machine is not "still Idle": a detent now would
+            # go out on the strength of a state nobody has confirmed.
+            self.state = 0
             return False
         # $13=1 has GRBL report in inches; its travel settings stay millimetres.
         scale = 25.4 if settings.get("$13") == "1" else 1.0
@@ -1141,8 +1148,16 @@ class Carve:
         # keeps going after the hand stops: the overshoot. Past this the knob is a
         # speed, not a distance, and the surplus is dropped. A lone detent is
         # always taken whole, however big its step.
+        #
+        # That is for a knob spun through many small detents. A detent that is
+        # itself a fair share of the cap - 10 mm against the 13.5 mm the X-Carve
+        # covers in a gather-and-lead, or any Z step from 1 mm up - is a move
+        # the hand meant, one click one move, so two of them in a batch are two
+        # moves, not a spin: never clipped, and never cancelled when the hand
+        # stops (that is `dropped`, and only a clipped batch sets it).
         cap = int(CARVE_FEED[axis] / 60.0 * (self.args.jog_interval + self.args.jog_lead) * 1000)
-        if self.queued_count > 1 and abs(self.queued[axis_index]) > cap:
+        deliberate = abs(delta_um) * 4 >= cap
+        if not deliberate and self.queued_count > 1 and abs(self.queued[axis_index]) > cap:
             self.queued[axis_index] = cap if self.queued[axis_index] > 0 else -cap
             self.dropped = True
 
