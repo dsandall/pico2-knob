@@ -272,13 +272,26 @@ an N-point touch-plate survey as a state machine: it parks the head over each
 point and waits for you to slide the plate under the bit. **Hold BTN3 (Z) for a
 second and let go without turning the knob**: if the pendant is waiting for the
 plate, that is Continue (it probes, lifts, moves to the next point); otherwise,
-from Idle, homed, no job, it is "probe here" — one probe at the current X Y,
-labelled `P1`, `P2`, … by the pendant. The hold is the step wheel's gesture, and
-it stays that: the wheel opens and closes on the same step, which is exactly
-what makes it free; turn the knob during the hold and it is a step change, not
-a probe. The relay's log is the readout — `SURVEY: waiting plate at FL (1/9)`,
-`SURVEY: probed P3 Z -81.689 (repeat 0.004)`, `survey: refused: …` — the OLED
-has no text row for it yet.
+from Idle, homed, no job, it is **PROBE Z HERE** — one probe at the current X Y,
+labelled `P1`, `P2`, … by the pendant, recorded into its survey, Z0 untouched.
+It is the same call (`POST /api/zsurvey/probe_here`) as the pendant's own PROBE Z
+HERE button and its `p p` keys, so the pendant's guard rails apply here too:
+Idle, homed, no job, probe input clear, plate and stock known (the Survey tab's
+fields) — a refusal comes back as `survey: (hold-z) refused: plate / stock
+thickness unknown: …`. The hold is the step wheel's gesture, and it stays that:
+the wheel opens and closes on the same step, which is exactly what makes it
+free; turn the knob during the hold and it is a step change, not a probe.
+
+`--probe-button` rebinds the gesture without a firmware change, from the console
+lines the puck already prints: `hold-z` (default), `hold-x`, `hold-y`,
+`double-knob` (press the knob twice within half a second — the menu opens and
+closes, nothing else), `double-x` / `double-y` / `double-z` (the firmware's own
+double tap only toggles the numbers), or `none`. The relay's log is the readout
+and says what it did — `survey: (hold-z) PROBE Z HERE -> probing P3 at work
+X100.000 Y100.000 (plate 15.105, stock 13.64)`, `survey: (hold-z) continue ->
+probing FL (1/9)`, `SURVEY: waiting plate at FL (1/9) - hold Z a second, let go
+without turning to continue`, `SURVEY: probed P3 Z -81.689 (repeat 0.004)` — the
+OLED has no text row for it yet.
 
 **CNCJS stays in charge of the machine.** It owns the X-Controller's serial port,
 and the bridge joins that connection the way a second browser tab does, so the

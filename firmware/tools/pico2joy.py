@@ -1024,6 +1024,22 @@ class Pendant:
         self.stopping = True
 
 
+# `--probe-button`: the puck gesture that is the pendant's survey probe, from the
+# console lines the firmware already prints ("BTN3 down", "ENC_SW up", "wheel:
+# step 1 mm"), so rebinding needs no firmware change. (kind, switch).
+PROBE_GESTURES = {
+    "hold-x": ("hold", "BTN1"), "hold-y": ("hold", "BTN2"), "hold-z": ("hold", "BTN3"),
+    "double-x": ("double", "BTN1"), "double-y": ("double", "BTN2"), "double-z": ("double", "BTN3"),
+    "double-knob": ("double", "ENC_SW"), "none": (None, None),
+}
+PROBE_GESTURE_HELP = {
+    "hold-x": "hold X a second, let go without turning", "hold-y": "hold Y a second, let go without turning",
+    "hold-z": "hold Z a second, let go without turning", "double-x": "press X twice within half a second",
+    "double-y": "press Y twice within half a second", "double-z": "press Z twice within half a second",
+    "double-knob": "press the knob twice within half a second", "none": "off",
+}
+
+
 class Carve:
     """The relay for the X-Carve: GRBL's truth down to the puck, jogs back up.
 
@@ -1080,6 +1096,9 @@ class Carve:
         self.hold_release = 0.0
         self.step_mm = None
         self.survey_seen = None
+        self.probe_gesture = getattr(args, "probe_button", "hold-z") or "hold-z"
+        if self.probe_gesture != "none" and isinstance(cnc, Pendant):
+            log("survey: probe gesture %s (%s)" % (self.probe_gesture, PROBE_GESTURE_HELP[self.probe_gesture]))
 
     def poll(self):
         """Read CNCJS's latest word. False while there is no machine to describe."""
@@ -1280,62 +1299,84 @@ class Carve:
     # and it was a step change, not a probe.
 
     HOLD_S = 0.9            # the firmware's HOLD_TICKS is 1000 ms
+    DOUBLE_S = 0.5          # two presses this close are a double tap (the firmware's is 400 ms)
 
     def console(self, line):
         """A human line from the puck (not `#`): the button edges and the wheel
-        report that make up the survey gesture. Everything else is ignored."""
+        report that make up the survey gesture (`--probe-button`, default
+        hold-z). Everything else is ignored. `hold-<axis>`: that button down a
+        second, up, and the wheel's step report unchanged. `double-<switch>`:
+        two downs within DOUBLE_S (the firmware's own double tap only toggles
+        the numbers, and a knob double press opens and closes the menu: both
+        leave the puck as it was, which is what makes them free)."""
         text = line.split("] ", 1)[1] if line.startswith("[") and "] " in line else line
         now = time.time()
-        if text == "BTN3 down":
-            self.btn3_down = now
-        elif text == "BTN3 up":
-            if self.btn3_down and now - self.btn3_down >= self.HOLD_S:
-                self.hold_release = now
-            self.btn3_down = 0.0
-        elif text.startswith("wheel: step ") or text.startswith("menu: jog step "):
-            try:
-                step = float(text.split("step ", 1)[1].split()[0])
-            except (IndexError, ValueError):
-                return
-            held = self.hold_release and now - self.hold_release < 0.5
-            self.hold_release = 0.0
-            if held and (self.step_mm is None or abs(step - self.step_mm) < 1e-6):
+        kind, switch = PROBE_GESTURES.get(self.probe_gesture, (None, None))
+        if kind is None:
+            return
+        if kind == "hold":
+            if text == switch + " down":
+                self.btn3_down = now
+            elif text == switch + " up":
+                if self.btn3_down and now - self.btn3_down >= self.HOLD_S:
+                    self.hold_release = now
+                self.btn3_down = 0.0
+            elif text.startswith("wheel: step ") or text.startswith("menu: jog step "):
+                try:
+                    step = float(text.split("step ", 1)[1].split()[0])
+                except (IndexError, ValueError):
+                    return
+                held = self.hold_release and now - self.hold_release < 0.5
+                self.hold_release = 0.0
+                if held and (self.step_mm is None or abs(step - self.step_mm) < 1e-6):
+                    self.survey()
+                elif held:
+                    log("survey: step changed to %g mm, not a probe" % step)
+                self.step_mm = step
+        elif kind == "double" and text == switch + " down":
+            if self.btn3_down and now - self.btn3_down < self.DOUBLE_S:
+                self.btn3_down = 0.0
                 self.survey()
-            elif held:
-                log("survey: step changed to %g mm, not a probe" % step)
-            self.step_mm = step
+            else:
+                self.btn3_down = now
 
     def survey(self):
-        """Continue the pendant's survey if it is waiting for the plate; else
-        probe here (label P1, P2, ... from the pendant) from Idle, homed, no job."""
+        """The one gesture, two meanings, both the pendant's own endpoints: Continue
+        the survey sequence if it is waiting for the plate; else PROBE Z HERE
+        (/api/zsurvey/probe_here, the same call as the pendant's button and its
+        `p p` keys: label P1, P2, ... and plate / stock from the Survey tab, every
+        guard rail checked there too). The log line says what it did."""
         cnc = self.cnc
+        how = self.probe_gesture
         if not isinstance(cnc, Pendant):
-            log("survey: needs the pendant (--pendant URL), not CNCJS")
+            log("survey: (%s) needs the pendant (--pendant URL), not CNCJS" % how)
             return
         view = cnc.raw() or {}
         seq = view.get("zsurvey_seq") or {}
         try:
             if seq.get("state") == "waiting":
                 cnc.post("/api/zsurvey/continue", {})
-                log("survey: continue -> probing %s (%d/%d)"
-                    % (seq.get("label"), seq.get("i", 0) + 1, seq.get("n", 0)))
+                log("survey: (%s) continue -> probing %s (%d/%d)"
+                    % (how, seq.get("label"), seq.get("i", 0) + 1, seq.get("n", 0)))
                 return
             if seq.get("active"):
-                log("survey: busy, %s %s" % (seq.get("state"), seq.get("label")))
+                log("survey: (%s) refused: busy, %s %s" % (how, seq.get("state"), seq.get("label")))
                 return
             if self.workflow != "idle":
-                log("survey: refused, job %s" % self.workflow)
+                log("survey: (%s) refused: job %s" % (how, self.workflow))
                 return
             if self.active != "Idle":
-                log("survey: refused, machine %s" % (self.active or "offline"))
+                log("survey: (%s) refused: machine %s" % (how, self.active or "offline"))
                 return
             if not view.get("homed"):
-                log("survey: refused, not homed")
+                log("survey: (%s) refused: not homed" % how)
                 return
             answer = cnc.post("/api/zsurvey/probe_here", {})
-            log("survey: probing %s here" % (answer.get("seq") or {}).get("label"))
+            log("survey: (%s) PROBE Z HERE -> probing %s at work X%.3f Y%.3f (plate %s, stock %s)"
+                % (how, answer.get("label") or (answer.get("seq") or {}).get("label"),
+                   self.position[0], self.position[1], answer.get("plate"), answer.get("stock")))
         except OSError as error:
-            log("survey: refused: %s" % error)
+            log("survey: (%s) refused: %s" % (how, error))
 
     def watch_survey(self):
         """Say, once, what the pendant's survey did: waiting for the plate, a
@@ -1362,8 +1403,9 @@ class Carve:
             if state == "done" and not seq.get("here"):
                 log("SURVEY: done, %d points" % len(seq.get("done") or []))
         if state == "waiting" and (was[0] != "waiting" or was[1] != seq.get("i")):
-            log("SURVEY: waiting plate at %s (%d/%d) - hold Z to continue"
-                % (label, seq.get("i", 0) + 1, seq.get("n", 0)))
+            log("SURVEY: waiting plate at %s (%d/%d) - %s to continue"
+                % (label, seq.get("i", 0) + 1, seq.get("n", 0),
+                   PROBE_GESTURE_HELP.get(self.probe_gesture, "the probe gesture")))
         elif state == "error":
             log("SURVEY: FAILED at %s: %s" % (label, seq.get("msg")))
         elif state == "aborted":
@@ -2838,6 +2880,12 @@ def main():
         sub.add_argument("--cncrc", default="~/.cncrc",
                          help="CNCJS's config file, for the secret its tokens are signed"
                               " with (default: %(default)s)")
+        sub.add_argument("--probe-button", default="hold-z", choices=sorted(PROBE_GESTURES),
+                         help="the puck gesture for the pendant's survey probe (Continue while"
+                              " it waits for the plate, else PROBE Z HERE): hold-x/y/z = hold"
+                              " that axis button a second and let go without turning;"
+                              " double-x/y/z/knob = two presses within half a second;"
+                              " none = off (default: %(default)s)")
 
     relay = subparsers.add_parser(
         "relay", help="own the link and follow the puck's view (gantry, music, quota)")
