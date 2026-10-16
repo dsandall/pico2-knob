@@ -39,7 +39,12 @@ The script waits 20 s for the drive, so you can start it and then double-tap;
 ./build.sh                       # -> out/pico2joy-bringup.uf2 (BLE, the default)
 ./build.sh --no-ble              # -> out/pico2joy-bringup-noble.uf2
 ./build.sh --offset-1000         # the alternate flash layout, see below
+./build.sh --name pico2joy-usbpower   # same, as out/pico2joy-usbpower.uf2
 ```
+
+`--name` renames the outputs (`BASE.uf2`, `BASE-noble.uf2`, `BASE-0x1000.uf2`), so
+a candidate can sit in `out/` next to the image already on the puck, which is then
+the rollback.
 
 The first boot after flashing writes `UICR.NFCPINS` (to free P0.09/P0.10 from the
 NFC block, where encoder A/B live) and resets itself once. If that reset lands in
@@ -88,7 +93,8 @@ Single-key commands:
 | `w`   | toggle the radio (advertising, or starting the BLE link)            |
 | `v`   | verbose: log every encoder quadrature transition, not just detents  |
 | `r`   | quota screen: ask the bridge to check the vendors now               |
-| `l`   | LED: dark / dim heartbeat / on                                      |
+| `l`   | LED: dark / dim heartbeat / on (the USB power profile keeps it dark) |
+| `u`   | power profile: auto / usb / full — see "USB power" below            |
 | `b`   | reboot into the UF2 bootloader                                      |
 | `#…`  | the machine channel — a line for the gantry bridge, not a keystroke |
 
@@ -127,7 +133,7 @@ than a model of one — see below.
   The press is decided on release: turn in between and it was a switch, let go
   without turning and it was the menu.
 - **Press the knob** to open the menu, **turn** to move, **BTN1/2/3** to select,
-  **press the knob again** to leave — it's the same gesture in and out. Rows: `ble`, `12V rail`, `led`, `screen`, `jog step`,
+  **press the knob again** to leave — it's the same gesture in and out. Rows: `ble`, `12V rail`, `power`, `led`, `screen`, `jog step`,
   `home all`, `battery`, `exit` — each showing its current value on the right.
 - The title bar says **which screen you are on**, the radio state, and the cell.
   It used to say `pico2joy` and carry a `12V` flag; neither earned its pixels —
@@ -163,7 +169,7 @@ tools/pico2joy.py scan            # what can see the puck right now
 tools/pico2joy.py monitor         # console passthrough
 tools/pico2joy.py relay           # every app, following the puck's view
 tools/pico2joy.py gantry          # just the gantry (relay pinned to one app)
-tools/pico2joy.py xcarve          # just the X-Carve, through CNCJS
+tools/pico2joy.py xcarve          # just the X-Carve, through xc-api
 tools/pico2joy.py quota           # just the Claude/Codex rate-limit windows
 tools/pico2joy.py flash out/pico2joy-bringup.uf2   # reflash, no reset button
 tools/pico2joy.py reset uf2|serial|ota             # into a bootloader mode
@@ -214,6 +220,8 @@ so neither end rounds twice:
 | host → puck | `#s <x> <y> <z> <homed-bits> <state>` | toolhead state, ~8 Hz |
 | host → puck | `#l <xmin> <xmax> <ymin> <ymax> <zmin> <zmax>` | travel limits |
 | host → puck | `#?` | identify |
+| host → puck | `#quiet <ms>` | 12 V rail and LED down for that long (max 10 s, `0` ends it) |
+| host → puck | `#power auto\|usb\|full` | set the power profile (see "USB power") |
 | puck → host | `#j <axis> <delta-um>` | jog request |
 | puck → host | `#c home` / `#c home_z` / `#c stop` | named command |
 | puck → host | `#v 1` | identify reply |
@@ -243,19 +251,48 @@ own message types, the printer's lines with an `x` after the `#` — `#xs`/`#xl`
 down, `#xj`/`#xc` up — so the two machines never read each other's state and
 one relay could serve both.
 
-The bridge lives on `rpi-xcarve`, the Pi that runs CNCJS next to the machine,
-with the puck on its USB:
+The bridge lives on `rpi-xcarve`, the Pi next to the machine (shop LAN
+`192.168.168.5`), with the puck on its USB. By default it talks to **xc-api**,
+the X-Carve cell's own API (`docs/overhaul/SPEC.md` in the X-Carve repo, port
+8860):
 
 ```
-scp tools/pico2joy.py rpi-xcarve.netbird.cloud:pico2joy/
-ssh rpi-xcarve.netbird.cloud 'python3 ~/pico2joy/pico2joy.py --link usb xcarve'
+scp tools/pico2joy.py thebu@192.168.168.5:pico2joy/
+ssh thebu@192.168.168.5 'python3 ~/pico2joy/pico2joy.py --link usb xcarve'   # --xc http://127.0.0.1:8860
 ```
 
-`tools/pico2joy-xcarve.service` runs the same thing at boot.
+`tools/pico2joy-xcarve.service` runs the same thing at boot. Everything is
+addressed over the shop LAN, never NetBird: `--xc` defaults to `$XC_URL`, else
+`http://127.0.0.1:8860` (from a desktop, `http://192.168.168.5:8860`).
 
-**Or through the pendant.** The X-Carve pendant (`xcarve_utils/pendant`, port
-8850 on the same Pi) opens the serial port exclusively, so while it has the
-port CNCJS has nothing for the bridge to join. `--pendant URL` goes through the
+**Through xc-api.** xc-grbld owns the X-Controller's port and never restarts;
+xc-api maps HTTP onto it and stamps each request with an actor. The bridge is
+the `puck` actor (`X-XC-Actor: puck`): physically at the machine, so never
+lease-gated, and its motion revokes an agent's lease. State is a poll of
+`GET /api/state` (`machine.state/wpos/wco`, `settings`, `modal`,
+`facts.homed`, `job`; `--xc-rate`, 5 Hz); a detent is `POST /api/jog {x, y, z,
+feed}`, `zero X` is `POST /api/zero {axes: "x"}` (the daemon's own zero, so the
+`xy_zero`/`z_zero` facts record who set it), `home all` is `POST /api/home`,
+`#xc stop` and the jog cancel are `POST /api/rt {what: hold | jogcancel}`, and
+the probe gesture (below) uses the ported `/api/zsurvey/*`, or `POST
+/api/probe_z` with the daemon's defaults where the survey isn't there. A job
+parked by xc's soft pause takes jogs and zeros; anything streaming takes none.
+
+It also follows `GET /api/events/stream` (SSE). When a `spindle_cmd` with
+`on: true` arrives — the router switching on — it sends the puck **`#quiet
+1500`** (`--quiet-ms`, `0` = off), whichever screen is up: the puck drops its
+12 V panel rail and its LED for 1.5 s while the router's inrush sags the Pi's
+5 V. See "USB power". Events older than 10 s, and replays after a reconnect,
+are ignored. `tools/test_pico2joy_xc.py` runs the whole relay against a stub
+xc-api with a pty for the puck — no Pi, no machine:
+
+```
+python3 tools/test_pico2joy_xc.py
+```
+
+**Or through the old pendant** — the fallback while xc is new. The X-Carve
+pendant (`xcarve_utils/pendant`, port 8850 on the same Pi) opens the serial port
+exclusively, so while it has the port neither xc nor CNCJS can. `--pendant URL` goes through the
 pendant's HTTP API instead — `/api/state`, `/api/jog`, `/api/cmd`, `/api/rt` —
 with the same jogs, zeroing and homing:
 
@@ -267,7 +304,7 @@ Keep it on the Pi: every jog is one HTTP request and every state update one
 poll, and on localhost those cost nothing, where a VPN hop puts its round trip
 on each detent.
 
-**The plate survey from the puck** (pendant only). The pendant's Survey tab runs
+**The plate survey from the puck** (pendant, or xc-api's port of it). The pendant's Survey tab runs
 an N-point touch-plate survey as a state machine: it parks the head over each
 point and waits for you to slide the plate under the bit. **Hold BTN3 (Z) for a
 second and let go without turning the knob**: if the pendant is waiting for the
@@ -293,7 +330,8 @@ probing FL (1/9)`, `SURVEY: waiting plate at FL (1/9) - hold Z a second, let go
 without turning to continue`, `SURVEY: probed P3 Z -81.689 (repeat 0.004)` — the
 OLED has no text row for it yet.
 
-**CNCJS stays in charge of the machine.** It owns the X-Controller's serial port,
+**Or through CNCJS** (`--cncjs http://127.0.0.1:8000`), how this started.
+CNCJS stays in charge of the machine. It owns the X-Controller's serial port,
 and the bridge joins that connection the way a second browser tab does, so the
 CNCJS page and the puck work side by side. It doesn't take the port from anyone:
 close it in CNCJS and the bridge waits until somebody opens it again. It speaks
@@ -578,6 +616,78 @@ this should heal on its own; `bluetoothctl remove <address>` is the manual
 version, and `bluez-utils` is worth having installed for exactly that kind of
 poking.
 
+## USB power
+
+On the X-Carve the puck runs off the Pi's USB (no cell is fitted), and at the
+router's inrush the Pi's 5 V sagged far enough to trip its undervoltage — every
+USB device re-enumerated and the CNC controller reset with them. The **USB power
+profile** (`src/power.rs`) makes the puck as small and as flat a load as it can
+be, and gets it out of the way while the router starts:
+
+- **LED dark**, whatever `l` says.
+- **Contrast capped at `0x2F`** (default `0x4F`). The SH1107's segment current is
+  linear in contrast, so that is ~60% of the panel's current. `+` above the cap
+  is remembered and comes back when the profile ends.
+- **12 V rail soft-started.** Enabling Q1 in one edge charges U2's input cap and,
+  through L1/D1, its 22 µF output cap at once: ~4.5 V × √(22 µF / 100 µH) ≈ 2 A
+  for ~75 µs, which the MC34063's current limit can't see. The firmware pulses
+  the gate instead, 2 µs growing to 100 µs over 50 ms, and leans on R8's slow
+  pull-up to keep each pulse soft. Unmeasured: scope `+BATT` and TP4 on the
+  first bodged board and tune `SOFT_START_*` in `main.rs`.
+- **12 V rail dropped after 30 s without input**: panel off, then the rail. Any
+  knob turn or button wakes it (re-init, soft start, panel on), and **that first
+  touch only wakes** — a knob turned blind does not jog the machine.
+  Console keys wake it too. Host traffic does not.
+- **Radio held off while the USB link is live** (a host has the port open):
+  nothing advertises, the title bar says `usb`. Close the port and it advertises
+  again. A BLE connection already up is left alone.
+- **`#quiet <ms>`** on the machine channel drops the rail and the LED for that
+  long (10 s max, `#quiet 0` ends it early), then puts back whatever was there.
+  The X-Carve bridge sends `#quiet 1500` on every router start.
+
+**When it applies.** `auto` (the default) turns it on whenever VBUS is present;
+`usb` forces it, `full` turns it off. `u` on the console, the menu's `power`
+row, or `#power auto|usb|full` set it (not persisted: a reboot is `auto` again).
+It is VBUS and not "VBUS and no cell" because the cell is invisible exactly
+then: VDDH reads VBUS less a diode drop whenever USB is in, cell or no cell
+(see Battery). And a puck on USB with a cell is also charging it from that
+port, which is more reason to keep the rest down, not less. `p` reports the
+profile, VBUS, the USB link, the rail and the seconds to idle.
+
+**Q1.** On a board where Q1 is still in backwards (below) the rail can't be
+gated: "rail down" there is panel off only, U2 keeps running on the body
+diode, and the soft start changes nothing — the inrush happened at plug-in.
+The bodge (`docs/q1-bodge-preview.png`) is what makes the rail switchable.
+
+### The budget
+
+Estimates from the schematic and datasheets, not measurements — meter it with a
+USB power meter before trusting any line. Referred to the 5 V USB input, with
+VDDH/+BATT ≈ 4.5 V (VBUS less the input diode, measured 4.54 V).
+
+| load | today | USB profile | basis |
+|------|-------|-------------|-------|
+| nRF52840: CPU (1 kHz poll, 25 fps on change), HFXO, USBD | ~4–6 mA | same | CPU 6.3 mA active at 64 MHz on the LDO (embassy leaves DCDC off), a few % duty; HFXO ~0.25 mA; USBD ~1–2 mA (assumed) |
+| radio | 0.1–0.4 mA avg, ~15 mA peaks | 0 while USB is open | 160 ms connectable advertising, TX/RX ~10–15 mA on the LDO |
+| blue LED | ~0 (dim wink) to ~2 mA (`on`) | 0 | 3% PWM for 120 ms every 5 s; resistor on the module assumed |
+| 3V3 pad: OLED VDD, pull-ups | ~0.1 mA | same | SH1107 IDD 55 µA typ |
+| U2 quiescent + feedback divider | ~7–9 mA | 0 when idle (bodged) | MC34063 ICC 2.5 mA typ / 4 max; R4+R3 = 9.66 kΩ at 12 V = 1.25 mA out ≈ 5 mA in at η ≈ 65% |
+| panel (VPP 12 V) | ~5–40 mA | ~3–25 mA, 0 when idle | IPP 25 mA typ / 32 max for all pixels on (datasheet); ×(lit fraction 5–40%) ×(contrast/0x4F); ×12/(4.5×0.65) ≈ 4.1 to the input |
+| **total, in use** | **~20–55 mA**, ~120 mA all-white | **~15–40 mA** | |
+| **total, idle / during `#quiet`** | same as in use | **~5 mA** bodged, ~13 mA unbodged | |
+| rail enable | ~2 A for ~75 µs (LC), every enable | staged over ~50 ms | see soft start |
+
+For scale, the Pi 3B itself draws 0.3–0.7 A plus its USB devices, and trips
+undervoltage below 4.63 V. **The puck cannot have caused that sag, and this
+profile cannot prevent it**: 50 mA through a few hundred milliohms of cable and
+supply is tens of millivolts. What it does is take the puck's part — small,
+spiky and switched on whenever the rail came up — out of the event. The fix for
+the brownout is the supply: a proper 5.1 V ≥ 2.5 A Pi supply on short, thick
+cable, not on the router's circuit or power strip; a powered USB hub for the
+puck and the controller; and, ideally, the router on its own soft-start or
+contactor. Running the puck on a cell over BLE (J2) takes it off the Pi
+altogether.
+
 ## Battery
 
 The nice!nano v2 senses the cell through **VDDH**, not a divider pin, so this
@@ -606,8 +716,9 @@ is. Neither is worth correcting until a battery is actually on J2.
   it switches to the cube, which is a live view of the encoder and the buttons
   in its own right: hold a button and turn, and the cube spins.
 - **U2, the 12 V boost**, which the panel needs as external VPP (11.5–12.5 V, the
-  panel's own DC-DC stays off via `0xAD 0x8A`). Brought up after the controller
-  is initialised and dropped before it, and `e` toggles it.
+  panel's own DC-DC stays off via `0xAD 0x8A`). Brought up (soft-started, see
+  "USB power") after the controller is initialised and dropped before it, and
+  `e` toggles it.
 
 Untested: the LiPo path (J2, `VBAT`).
 
@@ -691,7 +802,7 @@ always gets you back.
 
 - Battery: read VDDH via SAADC for a rough LiPo percentage (the nice!nano v2
   senses the cell through VDDH, not a divider pin).
-- Sleep: the panel and the 12 V rail dominate the power budget, so idle wants
-  display-off plus VPP down — which needs the Q1 fix above to actually work.
+- Sleep: the USB power profile (above) already drops the panel and the rail on
+  idle; the same on a cell wants the Q1 bodge, and System OFF with a GPIO wake.
 - BLE HID over `nrf-softdevice` or `trouble`, which is where the app at 0x26000
   starts mattering: a SoftDevice build has to move up to 0x27000.
