@@ -30,6 +30,8 @@ pub enum MenuItem {
     Zero,
     Link,
     Rail,
+    /// The USB power profile: auto / usb / full. See `src/power.rs`.
+    Power,
     Led,
     Screen,
     Step,
@@ -42,6 +44,7 @@ pub enum MenuItem {
 pub const MENU: &[MenuItem] = &[
     MenuItem::Link,
     MenuItem::Rail,
+    MenuItem::Power,
     MenuItem::Led,
     MenuItem::Screen,
     MenuItem::Step,
@@ -56,6 +59,7 @@ pub const XCARVE_MENU: &[MenuItem] = &[
     MenuItem::Zero,
     MenuItem::Link,
     MenuItem::Rail,
+    MenuItem::Power,
     MenuItem::Led,
     MenuItem::Screen,
     MenuItem::Step,
@@ -74,6 +78,7 @@ impl MenuItem {
             Self::Zero => "zero",
             Self::Link => "ble",
             Self::Rail => "12V rail",
+            Self::Power => "power",
             Self::Led => "led",
             Self::Screen => "screen",
             Self::Step => "jog step",
@@ -93,6 +98,7 @@ pub struct MenuState {
     pub axis: usize,
     pub zero_armed: bool,
     pub link: &'static str,
+    pub power: &'static str,
     pub vpp_on: bool,
     pub led: &'static str,
     pub view: &'static str,
@@ -191,6 +197,9 @@ pub fn draw_menu(d: &mut Display<'_>, menu: &MenuState) {
             }
             MenuItem::Rail => {
                 let _ = write!(value, "{}", if menu.vpp_on { "on" } else { "off" });
+            }
+            MenuItem::Power => {
+                let _ = write!(value, "{}", menu.power);
             }
             MenuItem::Led => {
                 let _ = write!(value, "{}", menu.led);

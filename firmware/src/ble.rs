@@ -167,12 +167,24 @@ async fn step(what: &str) {
     Timer::after_millis(80).await;
 }
 
+/// Resolves once the radio should stop advertising: see `src/power.rs`.
+async fn radio_withdrawn() {
+    while crate::power::radio_allowed() {
+        Timer::after_millis(200).await;
+    }
+}
+
 pub async fn run<F: FnMut() -> Payload>(p: Claimed, snapshot: F) -> ! {
     // Let the console come up first, so a stack that wedges bringing the radio
     // up still leaves a board you can talk to; and the menu's `ble` row (or
     // 'w') can hold it off altogether.
+    // The USB power profile holds it off too, while a host has the USB port
+    // open - see `src/power.rs`.
     Timer::after_millis(1500).await;
-    while !crate::RADIO_ON.load(core::sync::atomic::Ordering::Relaxed) {
+    while !crate::power::radio_allowed() {
+        if crate::power::radio_held() {
+            crate::LINK_STATE.store(crate::LINK_HELD, core::sync::atomic::Ordering::Relaxed);
+        }
         Timer::after_millis(100).await;
     }
 
@@ -291,6 +303,19 @@ async fn try_run<F: FnMut() -> Payload>(p: Claimed, mut snapshot: F) -> Result<(
     crate::LINK_STATE.store(2, core::sync::atomic::Ordering::Relaxed);
     let serve = async {
         loop {
+            // Advertising is the radio's standing cost; hold it while the
+            // USB link is live under the USB power profile (or the user has
+            // switched the radio off since the stack came up).
+            if !crate::power::radio_allowed() {
+                crate::LINK_STATE.store(
+                    if crate::power::radio_held() { crate::LINK_HELD } else { 0 },
+                    core::sync::atomic::Ordering::Relaxed,
+                );
+                while !crate::power::radio_allowed() {
+                    Timer::after_millis(200).await;
+                }
+                crate::LINK_STATE.store(2, core::sync::atomic::Ordering::Relaxed);
+            }
             let acceptor = match peripheral
                 .advertise(
                     &Default::default(),
@@ -308,7 +333,14 @@ async fn try_run<F: FnMut() -> Payload>(p: Claimed, mut snapshot: F) -> Result<(
                 }
             };
 
-            let Ok(conn) = acceptor.accept().await else { continue };
+            // Dropping the advertiser stops advertising (trouble-host cancels
+            // it on drop), so losing this race is what turns the radio off.
+            let accepted =
+                match embassy_futures::select::select(acceptor.accept(), radio_withdrawn()).await {
+                    embassy_futures::select::Either::First(accepted) => accepted,
+                    embassy_futures::select::Either::Second(()) => continue,
+                };
+            let Ok(conn) = accepted else { continue };
             let Ok(conn) = conn.with_attribute_server(&server) else { continue };
             crate::LINK_STATE.store(3, core::sync::atomic::Ordering::Relaxed);
             crate::logln!("ble: connected");

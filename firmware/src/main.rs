@@ -40,6 +40,7 @@ mod media;
 mod cube;
 mod display;
 mod gantry;
+mod power;
 mod quota;
 #[cfg(not(feature = "ble"))]
 mod radio;
@@ -128,7 +129,8 @@ const HELP: &str = concat!(
     "          gantry, xcarve: 1/2/3 pick the axis, knob jogs it (needs the bridge)\r\n",
     "          quota: hold a button to re-check the plans | r does it here\r\n",
     "          l led (dark/dim/on) | v verbose | b bootloader (UF2)\r\n",
-    "          #r uf2|serial|ota  reboot into a bootloader mode\r\n"
+    "          u power profile (auto/usb/full) | #quiet <ms> rail+led down\r\n",
+    "          #power auto|usb|full | #r uf2|serial|ota  reboot into a bootloader mode\r\n"
 );
 
 /// What a host gets for opening the port.
@@ -183,8 +185,10 @@ static RADIO_ON: AtomicBool = AtomicBool::new(true);
 static SEQ: AtomicU8 = AtomicU8::new(0);
 /// BAT+ / VDDH in millivolts, refreshed by the render loop.
 static BATT_MV: AtomicU16 = AtomicU16::new(0);
-/// 0 = off, 1 = starting, 2 = advertising, 3 = connected.
+/// 0 = off, 1 = starting, 2 = advertising, 3 = connected, 4 = held off by the
+/// USB power profile while the USB link is live (see [`power`]).
 static LINK_STATE: AtomicU8 = AtomicU8::new(0);
+pub const LINK_HELD: u8 = 4;
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 static MENU_SEL: AtomicU8 = AtomicU8::new(0);
 /// 0 = the cube, 1 = the printer's gantry, 2 = the X-Carve, 3 = now playing,
@@ -263,10 +267,15 @@ static REQ_REINIT: AtomicBool = AtomicBool::new(false);
 static REQ_FLIP: AtomicBool = AtomicBool::new(false);
 static REQ_BRIGHTER: AtomicBool = AtomicBool::new(false);
 static REQ_DIMMER: AtomicBool = AtomicBool::new(false);
+/// Whether the user wants the 12 V rail up (`e`, the menu's rail row). The
+/// rail is actually up when this is set *and* neither idle nor `#quiet` holds
+/// it down - see the render loop.
+static RAIL_WANTED: AtomicBool = AtomicBool::new(true);
 
 pub fn link_label() -> &'static str {
     match LINK_STATE.load(Ordering::Relaxed) {
         1 => "starting",
+        LINK_HELD => "usb link",
         2 => "adv",
         3 => "connected",
         _ => "off",
@@ -274,6 +283,9 @@ pub fn link_label() -> &'static str {
 }
 
 fn led_label() -> &'static str {
+    if power::led_forced_dark() {
+        return "usb:dark";
+    }
     match LED_MODE.load(Ordering::Relaxed) {
         0 => "dark",
         2 => "on",
@@ -286,6 +298,7 @@ fn led_label() -> &'static str {
 pub fn link_short() -> &'static str {
     match LINK_STATE.load(Ordering::Relaxed) {
         1 => "...",
+        LINK_HELD => "usb",
         2 => "adv",
         3 => "ble",
         _ => "off",
@@ -420,6 +433,43 @@ impl<'d> Boost<'d> {
         VPP_ON.store(on, Ordering::Relaxed);
     }
 
+    /// Bring the rail up in stages rather than with one edge.
+    ///
+    /// Enabling Q1 hard dumps +BATT straight into U2's input capacitor and,
+    /// through L1 and D1 (a boost converter's DC path), into the output
+    /// capacitor - an LC inrush the MC34063's current limit cannot see, since
+    /// it only limits its own switch. Roughly 4.5 V x sqrt(22 uF / 100 uH) ~ 2 A
+    /// peak for ~75 us, on the same 5 V the host is running on.
+    ///
+    /// So Q1 is pulsed: the gate is pulled low for a few microseconds, then
+    /// released to R8 (100k), whose slow pull-up leaves the FET in its linear
+    /// region for a further few tens of microseconds - a current limit of
+    /// sorts. Pulses grow from 2 us to 100 us across 50 periods of ~1 ms, then
+    /// the gate is held low. Each pulse moves a small packet of charge, so
+    /// the caps fill over ~50 ms instead of at once. This is a software
+    /// approximation of a soft start, not a measured one: scope +BATT and TP4
+    /// on the first bodged board and tune [`SOFT_START_STEPS`] /
+    /// [`SOFT_START_MAX_US`] if needed.
+    ///
+    /// On a board with Q1 still in backwards its body diode feeds U2 anyway, so
+    /// none of this changes anything there - the inrush happened at plug-in.
+    async fn soft_start(&mut self) {
+        if self.on {
+            return;
+        }
+        for step in 1..=SOFT_START_STEPS {
+            let on_us = SOFT_START_MAX_US * step / SOFT_START_STEPS;
+            self.pin.set_low();
+            self.pin.set_as_output(OutputDrive::Standard);
+            // Busy-wait: the pulses are shorter than a 32 kHz timer tick, and
+            // at most 100 us of blocking costs the 1 kHz input poll nothing.
+            cortex_m::asm::delay(64 * on_us);
+            self.pin.set_as_disconnected();
+            Timer::after_micros(SOFT_START_PERIOD_US).await;
+        }
+        self.set(true);
+    }
+
     /// Describes the *pin*, not the rail - see the type-level note.
     fn state(&self) -> &'static str {
         if self.on {
@@ -429,6 +479,12 @@ impl<'d> Boost<'d> {
         }
     }
 }
+
+/// The soft start's shape: this many pulses, growing linearly to this long,
+/// one per period. See [`Boost::soft_start`].
+const SOFT_START_STEPS: u32 = 50;
+const SOFT_START_MAX_US: u32 = 100;
+const SOFT_START_PERIOD_US: u64 = 1000;
 
 #[embassy_executor::main]
 async fn main(_spawner: embassy_executor::Spawner) {
@@ -655,6 +711,9 @@ async fn main(_spawner: embassy_executor::Spawner) {
         loop {
             // A host opening the port asserts DTR; greet it and dump the inputs.
             let open = tx.dtr();
+            // A host with the port open is the USB link the power profile
+            // holds the radio off for.
+            power::set_usb_link(open);
 
             // The 1200-baud touch: open at 1200, then close. Trigger on DTR
             // *falling* rather than on "DTR is low", because a host sets the line
@@ -719,6 +778,9 @@ async fn main(_spawner: embassy_executor::Spawner) {
         let mut rate: f32 = 0.0;
 
         let mut pressed = [false; 4];
+        // A press that woke an idle-dark panel: it and its release do nothing
+        // else, so the wake press can't jog, select or open the menu.
+        let mut swallowed = [false; 4];
         let mut stable = [0u8; 4];
         // Tick of each button's last press, for spotting a double tap.
         let mut last_press = [0u32; 4];
@@ -754,7 +816,12 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     if quarters.abs() >= 4 {
                         let direction = quarters.signum() as i32;
                         quarters = 0;
-                        if pressed[3] {
+                        if power::touch() {
+                            // The panel is dark from idling: this detent wakes
+                            // it and does nothing else - a knob turned blind
+                            // must not jog the machine.
+                            logln!("wake: knob");
+                        } else if pressed[3] {
                             // Hold the knob and turn it: the app switcher. One
                             // gesture reaches every screen from every screen,
                             // which `d` on the console can only do forwards -
@@ -879,7 +946,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
             // Held-button gestures. Edges are handled below; this is the part
             // that needs to notice time passing rather than a change.
             for i in 0..3 {
-                if pressed[i] {
+                if pressed[i] && !swallowed[i] {
                     held[i] = held[i].saturating_add(1);
                     // One second on any axis button opens the step wheel. Any
                     // button, because whichever one is under your thumb is the
@@ -937,6 +1004,16 @@ async fn main(_spawner: embassy_executor::Spawner) {
                             SWITCH_NAMES[i],
                             if down { "down" } else { "up" }
                         );
+                        if down && power::touch() {
+                            swallowed[i] = true;
+                            logln!("wake: {}", SWITCH_NAMES[i]);
+                        }
+                        if swallowed[i] {
+                            if !down {
+                                swallowed[i] = false;
+                            }
+                            continue;
+                        }
 
                         // BTN1/2/3 pick the axis the knob jogs, unless the menu
                         // has the buttons.
@@ -1018,6 +1095,23 @@ async fn main(_spawner: embassy_executor::Spawner) {
                     state::percent_from_mv(millivolts),
                     link_label()
                 );
+                match power::idle_in_s() {
+                    Some(s) => logln!(
+                        "power {} | vbus {} | usb link {} | rail {}{} | idle in {s}s",
+                        power::profile_label(),
+                        power::vbus() as u8,
+                        power::usb_link() as u8,
+                        if VPP_ON.load(Ordering::Relaxed) { "up" } else { "down" },
+                        if power::quiet_active() { " (quiet)" } else { "" },
+                    ),
+                    None => logln!(
+                        "power {} | vbus {} | rail {}{}",
+                        power::profile_label(),
+                        power::vbus() as u8,
+                        if VPP_ON.load(Ordering::Relaxed) { "up" } else { "down" },
+                        if power::quiet_active() { " (quiet)" } else { "" },
+                    ),
+                }
                 let counts = axis_counts();
                 logln!(
                     "axis {} | X{:+} Y{:+} Z{:+}",
@@ -1044,6 +1138,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
 
             // Heartbeat.
             let duty = match LED_MODE.load(Ordering::Relaxed) {
+                _ if power::led_forced_dark() => 0,
                 0 => 0,
                 2 => LED_FULL_DUTY,
                 _ if ticks % HEARTBEAT_PERIOD_TICKS < HEARTBEAT_ON_TICKS => HEARTBEAT_DUTY,
@@ -1066,10 +1161,16 @@ async fn main(_spawner: embassy_executor::Spawner) {
         // VDD is already up (P0.13). Init with the display off, bring VPP up, then
         // turn the panel on - and unwind in the opposite order.
         screen.init().await;
-        boost.set(true);
+        // The contrast the user asked for; what the panel gets is this, capped
+        // under the USB power profile.
+        let mut wanted_contrast = screen.contrast();
+        if power::usb_profile() {
+            screen.set_contrast(wanted_contrast.min(power::CONTRAST_CAP)).await;
+        }
+        boost.soft_start().await;
         Timer::after_millis(100).await;
         screen.on().await;
-        logln!("display: SH1107 128x128 up, {}", boost.state());
+        logln!("display: SH1107 128x128 up, {} (power {})", boost.state(), power::profile_label());
 
         ui::test_pattern(&mut screen);
         screen.flush().await;
@@ -1103,14 +1204,26 @@ async fn main(_spawner: embassy_executor::Spawner) {
                 force = true;
             }
             if REQ_BRIGHTER.swap(false, Ordering::Relaxed) {
-                let c = screen.contrast().saturating_add(0x10);
-                screen.set_contrast(c).await;
-                logln!("contrast 0x{c:02x}");
+                wanted_contrast = wanted_contrast.saturating_add(0x10);
+                if power::usb_profile() && wanted_contrast > power::CONTRAST_CAP {
+                    logln!("contrast 0x{wanted_contrast:02x}, capped at 0x{:02x} on usb power", power::CONTRAST_CAP);
+                } else {
+                    logln!("contrast 0x{wanted_contrast:02x}");
+                }
             }
             if REQ_DIMMER.swap(false, Ordering::Relaxed) {
-                let c = screen.contrast().saturating_sub(0x10);
-                screen.set_contrast(c).await;
-                logln!("contrast 0x{c:02x}");
+                wanted_contrast = wanted_contrast.saturating_sub(0x10);
+                logln!("contrast 0x{wanted_contrast:02x}");
+            }
+            // The cap follows the profile in both directions: unplug onto a
+            // cell (or `#power full`) and the full contrast comes back.
+            let contrast = if power::usb_profile() {
+                wanted_contrast.min(power::CONTRAST_CAP)
+            } else {
+                wanted_contrast
+            };
+            if contrast != screen.contrast() {
+                screen.set_contrast(contrast).await;
             }
             if REQ_VIEW.swap(false, Ordering::Relaxed) {
                 let view = (VIEW.load(Ordering::Relaxed) + 1) % VIEWS;
@@ -1150,17 +1263,49 @@ async fn main(_spawner: embassy_executor::Spawner) {
                 reboot_to_bootloader(pending);
             }
             if REQ_BOOST.swap(false, Ordering::Relaxed) {
-                if boost.on {
+                let wanted = !RAIL_WANTED.fetch_xor(true, Ordering::Relaxed);
+                // Asking for the rail is input like any other: it shouldn't
+                // come up only to idle straight back down.
+                power::touch();
+                logln!("12V rail {} by request - meter TP4 for 12V", if wanted { "on" } else { "off" });
+            }
+
+            // Where the rail should be: up if wanted, unless the puck has idled
+            // under the USB profile or a `#quiet` hold is running - and never
+            // touched while a reboot is pending, which wants its frame shown.
+            let idle = power::idle();
+            let quiet = power::quiet_active();
+            let rail = RAIL_WANTED.load(Ordering::Relaxed) && !idle && !quiet;
+            if rail != boost.on {
+                if rail {
+                    boost.soft_start().await;
+                    Timer::after_millis(100).await;
+                    if power::idle_dark() {
+                        // Back from an idle: the controller kept its RAM on
+                        // VDD, but a full re-init is cheap and is the path
+                        // that is known to bring a panel back from anything.
+                        screen.init().await;
+                        logln!("wake: 12V rail up, display re-initialised");
+                    }
+                    screen.on().await;
+                    power::set_idle_dark(false);
+                } else {
                     // Panel off before its rail, per the usual OLED ordering.
                     screen.off().await;
                     boost.set(false);
-                } else {
-                    boost.set(true);
-                    Timer::after_millis(100).await;
-                    screen.on().await;
+                    if idle {
+                        power::set_idle_dark(true);
+                        logln!("idle: 12V rail down, any input wakes it");
+                    } else if quiet {
+                        logln!("quiet: 12V rail down");
+                    }
                 }
-                logln!("{} - meter TP4 for 12V", boost.state());
+                logln!("{}", boost.state());
                 force = true;
+            } else if !rail && !idle && power::idle_dark() {
+                // Woken, but the rail is held down for another reason (quiet,
+                // or switched off): inputs act normally again.
+                power::set_idle_dark(false);
             }
 
             let state = ui::State {
@@ -1258,6 +1403,7 @@ async fn main(_spawner: embassy_executor::Spawner) {
                             axis,
                             zero_armed: zero_armed(axis),
                             link: link_label(),
+                            power: power::profile_label(),
                             vpp_on: boost.on,
                             led: led_label(),
                             view: view_label(),
@@ -1338,8 +1484,15 @@ async fn main(_spawner: embassy_executor::Spawner) {
 
         let mut ticker = Ticker::every(Duration::from_millis(500));
         loop {
-            let on = RADIO_ON.load(Ordering::Relaxed);
-            LINK_STATE.store(if on { 2 } else { 0 }, Ordering::Relaxed);
+            let on = power::radio_allowed();
+            LINK_STATE.store(
+                match (on, power::radio_held()) {
+                    (true, _) => 2,
+                    (false, true) => LINK_HELD,
+                    (false, false) => 0,
+                },
+                Ordering::Relaxed,
+            );
             if on {
                 adv.update(&snapshot());
                 adv.transmit().await;
@@ -1460,6 +1613,10 @@ fn activate_menu_item() {
             logln!("menu: link {}", if on { "on" } else { "off" });
         }
         ui::MenuItem::Rail => REQ_BOOST.store(true, Ordering::Relaxed),
+        ui::MenuItem::Power => {
+            power::next_mode();
+            logln!("menu: power {}", power::profile_label());
+        }
         ui::MenuItem::Led => {
             let mode = (LED_MODE.load(Ordering::Relaxed) + 1) % 3;
             LED_MODE.store(mode, Ordering::Relaxed);
@@ -1654,7 +1811,14 @@ fn reboot_to_bootloader(magic: u8) -> ! {
 /// One console keystroke. Everything here is a request flag or a counter, so
 /// it can run from wherever the byte turned up.
 fn console_key(byte: u8) {
+    // Somebody at the console counts as somebody using the puck, but never
+    // has a key swallowed: they can't see whether the panel is lit.
+    power::touch();
     match byte {
+        b'u' => {
+            power::next_mode();
+            logln!("power: {}", power::profile_label());
+        }
         b'?' | b'h' => REQ_HELP.store(true, Ordering::Relaxed),
         b'p' => REQ_PINS.store(true, Ordering::Relaxed),
         // Handy without hands on the puck.
@@ -1724,6 +1888,22 @@ fn machine_line(line: &str) {
         Some("?") | Some("#?") => {
             proto!("#v 1");
             proto!("#view {}", view_label());
+        }
+        // Drop the 12 V rail and the LED for this many ms, then put them back:
+        // the relay sends it as the router starts, when the host's 5 V sags.
+        Some("quiet") | Some("#quiet") => {
+            let asked = fields.next().and_then(|ms| ms.parse::<u32>().ok()).unwrap_or(1500);
+            let ms = power::quiet(asked);
+            logln!("quiet: {ms} ms");
+        }
+        Some("power") | Some("#power") => {
+            match fields.next() {
+                Some("auto") => power::set_mode(power::Mode::Auto),
+                Some("usb") => power::set_mode(power::Mode::Usb),
+                Some("full") => power::set_mode(power::Mode::Full),
+                _ => {}
+            }
+            logln!("power: {}", power::profile_label());
         }
         // Reboot into a bootloader mode by name, so a host can start an update
         // without anyone touching the reset button.

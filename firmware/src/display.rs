@@ -70,6 +70,13 @@ impl<'d> Display<'d> {
         Timer::after_millis(50).await;
 
         self.cmds(INIT).await;
+        // INIT carries the vendor contrast and the unflipped scan direction;
+        // put back whatever this panel was actually set to, so a re-init (or
+        // a wake from idle) doesn't quietly undo the contrast cap or a flip.
+        self.cmds(&[0x81, self.contrast]).await;
+        if self.flipped {
+            self.cmds(&[0xC8, 0xA1]).await;
+        }
         self.fb.fill(0);
         self.flush().await;
     }
