@@ -9,7 +9,7 @@
     tools/pico2joy.py monitor                 # console passthrough
     tools/pico2joy.py relay                   # every app, following the screen
     tools/pico2joy.py gantry                  # drive a Klipper gantry
-    tools/pico2joy.py xcarve                  # drive the X-Carve, through CNCJS
+    tools/pico2joy.py xcarve                  # drive the X-Carve, through xc-api
     tools/pico2joy.py spotify                 # transport + album art for the player
     tools/pico2joy.py quota                   # Claude/Codex rate-limit windows
     tools/pico2joy.py flash out/…uf2          # reflash over USB, no reset button
@@ -891,6 +891,7 @@ class Pendant:
     """
 
     kind = "pendant"
+    surveys = True
 
     def __init__(self, base, rate=10.0):
         self.base = base.rstrip("/")
@@ -1024,6 +1025,288 @@ class Pendant:
         self.stopping = True
 
 
+class XcApi:
+    """xc-api, the X-Carve cell's HTTP + SSE front (docs/overhaul/SPEC.md in the
+    X-Carve repo, port 8860), in place of the pendant or CNCJS.
+
+    xc-grbld owns the X-Controller's port and never restarts; xc-api maps HTTP
+    onto its RPC and stamps every request with an actor. This relay is the
+    `puck` actor (`X-XC-Actor: puck`): physically at the machine, so never
+    lease-gated, and its motion revokes an agent's lease. The calls:
+
+    - `GET /api/state` for the machine (`machine.state/wpos/wco`), `settings`,
+      `modal`, `facts.homed` and the `job`, polled on its own thread;
+    - `POST /api/jog {x,y,z,feed}` for a `$J=` move, `/api/rt {what}` for
+      hold / resume / reset / jogcancel, `/api/home`, `/api/unlock`,
+      `/api/zero {axes}` for a work zero, `/api/probe_z` for a Z probe (or the
+      ported `/api/zsurvey/*` when the survey is waiting), `/api/cmd` for any
+      other line;
+    - `GET /api/events/stream` (SSE) for the events. Only `spindle_cmd` matters
+      here: when the router is switched on, the Pi's 5 V sags with its inrush,
+      so the puck is told `#quiet <ms>` - drop its 12 V panel rail and LED for
+      that long - before it can add to the dip. See firmware/README.md, "USB
+      power".
+
+    Same `snapshot()` and `command()` as [`Cncjs`] and [`Pendant`], so [`Carve`]
+    never knows which one it has.
+    """
+
+    kind = "xc"
+    #: Carve's plate-survey gesture works here: the survey endpoints are ported.
+    surveys = True
+
+    def __init__(self, base, rate=5.0, actor="puck"):
+        self.base = base.rstrip("/")
+        self.port = "?"
+        self.actor = actor
+        self.lock = threading.Lock()
+        self.view = None
+        self.error = None
+        self.sse_error = None
+        self.stopping = False
+        self.period = 1.0 / rate
+        #: The last event seq seen, so a dropped stream resumes where it was.
+        self.seq = None
+        #: Events for the relay's own thread, which owns the puck's link.
+        self.events = queue.Queue(maxsize=64)
+        threading.Thread(target=self._run, name="xc-state", daemon=True).start()
+        threading.Thread(target=self._stream, name="xc-events", daemon=True).start()
+
+    def _headers(self, extra=None):
+        headers = {"X-XC-Actor": self.actor}
+        headers.update(extra or {})
+        return headers
+
+    def _get(self, path, timeout=3.0):
+        request = urllib.request.Request(self.base + path, headers=self._headers())
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def post(self, path, body):
+        """A POST whose answer matters: xc-api's JSON, or an OSError carrying its
+        refusal (`{"error": ..., "code": "lease|state|bad|io"}`) rather than a
+        bare "HTTP Error 409"."""
+        request = urllib.request.Request(
+            self.base + path, data=json.dumps(body).encode(),
+            headers=self._headers({"Content-Type": "application/json"}))
+        try:
+            with urllib.request.urlopen(request, timeout=5.0) as response:
+                text = response.read().decode("utf-8")
+                return json.loads(text) if text.strip() else {}
+        except urllib.error.HTTPError as error:
+            try:
+                why = json.loads(error.read().decode("utf-8")).get("error")
+            except (ValueError, OSError, AttributeError):
+                why = None
+            raise OSError(why or str(error))
+
+    _post = post
+
+    def raw(self):
+        """The last /api/state, plus `homed` lifted out of the facts, so
+        [`Carve.survey`] reads it the way it reads the pendant's."""
+        with self.lock:
+            view = self.view
+        if view is None:
+            return None
+        view = dict(view)
+        homed = (view.get("facts") or {}).get("homed")
+        if isinstance(homed, dict):
+            view["homed"] = bool(homed.get("value")) and homed.get("valid", True) is not False
+        return view
+
+    def _run(self):
+        while not self.stopping:
+            started = time.time()
+            try:
+                view = self._get("/api/state")
+            except (OSError, ValueError) as error:
+                view = None
+                if str(error) != self.error:
+                    self.error = str(error)
+                    log("xc: %s" % error)
+            else:
+                if self.error is not None:
+                    log("xc: back at %s" % self.base)
+                    self.error = None
+            with self.lock:
+                self.view = view
+                if view:
+                    self.port = view.get("port") or "?"
+                    if self.seq is None and isinstance(view.get("seq"), int):
+                        # Start the stream at "now": an old `spindle_cmd` replayed
+                        # from the ring is not a router starting.
+                        self.seq = view["seq"]
+            time.sleep(max(0.0, self.period - (time.time() - started)))
+
+    def _stream(self):
+        """Follow `/api/events/stream`, reconnecting forever. The server sends a
+        comment every 10 s, so 30 s of silence is a dead connection."""
+        while not self.stopping:
+            with self.lock:
+                since = self.seq
+            path = "/api/events/stream" + ("?since=%d" % since if since is not None else "")
+            request = urllib.request.Request(
+                self.base + path, headers=self._headers({"Accept": "text/event-stream"}))
+            try:
+                with urllib.request.urlopen(request, timeout=30.0) as response:
+                    if self.sse_error is not None:
+                        log("xc: event stream back")
+                        self.sse_error = None
+                    for event in parse_sse(response):
+                        self._event(event)
+                        if self.stopping:
+                            return
+            except (OSError, ValueError) as error:
+                if str(error) != self.sse_error:
+                    self.sse_error = str(error)
+                    log("xc: event stream: %s" % error)
+            time.sleep(2.0)
+
+    def _event(self, event):
+        try:
+            data = json.loads(event.get("data") or "{}")
+        except ValueError:
+            return
+        if not isinstance(data, dict):
+            return
+        seq = data.get("seq", event.get("id"))
+        try:
+            seq = int(seq)
+        except (TypeError, ValueError):
+            seq = None
+        with self.lock:
+            if seq is not None:
+                # Replays of what was already handled, after a reconnect.
+                if self.seq is not None and seq <= self.seq:
+                    return
+                self.seq = seq
+        data.setdefault("kind", event.get("event"))
+        # Stale events are history, not news: a router switched on a minute ago
+        # is not sagging the 5 V now.
+        stamp = data.get("t")
+        if isinstance(stamp, (int, float)) and abs(time.time() - stamp) > 10.0:
+            return
+        try:
+            self.events.put_nowait(data)
+        except queue.Full:
+            pass
+
+    def take_events(self):
+        out = []
+        while True:
+            try:
+                out.append(self.events.get_nowait())
+            except queue.Empty:
+                return out
+
+    def snapshot(self):
+        """Status, settings, workflow state, whether the daemon has the port, and
+        the active coordinate system - shaped the way [`Cncjs`] shapes them."""
+        with self.lock:
+            view = self.view
+        if not view or not view.get("connected"):
+            return {}, {}, "idle", False, ""
+        machine = view.get("machine") or view.get("status") or {}
+
+        def axes(values):
+            if isinstance(values, dict):
+                return values
+            return dict(zip(AXES, values)) if values else {}
+
+        status = {"activeState": (machine.get("state") or "").split(":")[0],
+                  "wpos": axes(machine.get("wpos")), "wco": axes(machine.get("wco"))}
+        settings = {}
+        for key, value in (view.get("settings") or {}).items():
+            key = str(key)
+            settings[key if key.startswith("$") else "$" + key] = value
+        job = view.get("job") or {}
+        job_state = job.get("state")
+        # A parked job (soft pause: lifted, router off, Idle) takes jogs and
+        # zeros from the people at the machine; anything mid-stream does not.
+        if job_state in ("parked", "park"):
+            workflow = "parked"
+        elif job_state == "paused":
+            workflow = "paused"
+        elif job_state in ("ready", "running", "finishing", "error", "draining"):
+            workflow = "running"
+        else:
+            workflow = "idle"
+        wcs = ""
+        for word in (view.get("modal") or "").split():
+            if word in ("G54", "G55", "G56", "G57", "G58", "G59"):
+                wcs = word
+        return status, settings, workflow, True, wcs
+
+    def command(self, cmd, *args):
+        """The CNCJS controller commands [`Carve`] uses, as xc-api endpoints."""
+        if cmd == "gcode":
+            line = args[0].strip()
+            upper = line.upper()
+            if upper.startswith("$J="):
+                body = {}
+                for word in line[3:].split():
+                    if word[0] in "XYZxyz":
+                        body[word[0].lower()] = float(word[1:])
+                    elif word[0] in "Ff":
+                        body["feed"] = float(word[1:])
+                self.post("/api/jog", body)
+                return
+            words = upper.split()
+            # `G10 L20 P1 X0`: the daemon's own zero, so the fact it records
+            # (xy_zero / z_zero, with the homing epoch) says who set it.
+            if words[:3] == ["G10", "L20", "P1"] and len(words) == 4 and words[3][1:] in ("0", "0.0"):
+                self.post("/api/zero", {"axes": words[3][0].lower(), "note": "puck"})
+                return
+            self.post("/api/cmd", {"line": line})
+        elif cmd == "jogCancel":
+            self.post("/api/rt", {"what": "jogcancel"})
+        elif cmd == "homing":
+            self.post("/api/home", {})
+        elif cmd == "unlock":
+            self.post("/api/unlock", {})
+        elif cmd == "feedhold":
+            self.post("/api/rt", {"what": "hold"})
+        elif cmd == "cyclestart":
+            self.post("/api/rt", {"what": "resume"})
+        elif cmd == "reset":
+            self.post("/api/rt", {"what": "reset"})
+        elif cmd == "probe_z":
+            self.post("/api/probe_z", dict(args[0]) if args else {})
+        else:
+            raise OSError("xc-api has no %r" % cmd)
+
+    def close(self):
+        self.stopping = True
+
+
+def parse_sse(stream):
+    """Server-sent events off a byte stream: one dict per event, with `event`,
+    `data` (lines joined) and `id`. Comments (the heartbeat) are skipped."""
+    event = {}
+    data = []
+    for raw in stream:
+        line = raw.decode("utf-8", "replace").rstrip("\r\n")
+        if not line:
+            if data or event:
+                event["data"] = "\n".join(data)
+                yield event
+            event, data = {}, []
+            continue
+        if line.startswith(":"):
+            continue
+        field, _, value = line.partition(":")
+        if value.startswith(" "):
+            value = value[1:]
+        if field == "data":
+            data.append(value)
+        elif field in ("event", "id"):
+            event[field] = value
+    if data:
+        event["data"] = "\n".join(data)
+        yield event
+
+
 # `--probe-button`: the puck gesture that is the pendant's survey probe, from the
 # console lines the firmware already prints ("BTN3 down", "ENC_SW up", "wheel:
 # step 1 mm"), so rebinding needs no firmware change. (kind, switch).
@@ -1097,7 +1380,7 @@ class Carve:
         self.step_mm = None
         self.survey_seen = None
         self.probe_gesture = getattr(args, "probe_button", "hold-z") or "hold-z"
-        if self.probe_gesture != "none" and isinstance(cnc, Pendant):
+        if self.probe_gesture != "none" and getattr(cnc, "surveys", False):
             log("survey: probe gesture %s (%s)" % (self.probe_gesture, PROBE_GESTURE_HELP[self.probe_gesture]))
 
     def poll(self):
@@ -1162,6 +1445,26 @@ class Carve:
     def describe(self):
         return "%s, work X%.3f Y%.3f Z%.3f" % (self.active, *self.position)
 
+    def forward_events(self):
+        """Pass on what the puck must hear whichever screen is up: the router
+        starting. `#quiet <ms>` drops the puck's 12 V rail and LED while the
+        inrush sags the host's 5 V (see firmware/README.md, "USB power").
+        Only xc-api streams events; the others have nothing to forward."""
+        take = getattr(self.cnc, "take_events", None)
+        if take is None:
+            return
+        quiet_ms = getattr(self.args, "quiet_ms", 1500)
+        for event in take():
+            if event.get("kind") != "spindle_cmd":
+                continue
+            on = event.get("on", event.get("value"))
+            if isinstance(on, str):
+                on = on.lower() in ("1", "true", "on", "m3", "m4")
+            if not on or quiet_ms <= 0:
+                continue
+            log("spindle on (%s): #quiet %d" % (event.get("actor") or "?", quiet_ms))
+            self.link.send("#quiet %d" % quiet_ms)
+
     def handle(self, line):
         fields = line[1:].split()
         if not fields:
@@ -1183,9 +1486,12 @@ class Carve:
         axis = AXES[axis_index]
         # GRBL only takes a jog from Idle or mid-jog, and a job that is paused
         # expects to find the head where it left it.
-        if self.workflow != "idle" or self.state != 1:
+        # xc-api's soft pause parks the job lifted, router off and Idle, and
+        # takes jogs from the people at the machine there.
+        if self.workflow not in ("idle", "parked") or self.state != 1:
             log("refused jog %s: %s" % (
-                axis.upper(), self.active if self.workflow == "idle" else "job " + self.workflow))
+                axis.upper(), self.active if self.workflow in ("idle", "parked")
+                else "job " + self.workflow))
             return
         now = time.time()
         if not self.queued_count:
@@ -1348,11 +1654,24 @@ class Carve:
         guard rail checked there too). The log line says what it did."""
         cnc = self.cnc
         how = self.probe_gesture
-        if not isinstance(cnc, Pendant):
-            log("survey: (%s) needs the pendant (--pendant URL), not CNCJS" % how)
+        if not getattr(cnc, "surveys", False):
+            log("survey: (%s) needs xc-api or the pendant, not CNCJS" % how)
             return
         view = cnc.raw() or {}
         seq = view.get("zsurvey_seq") or {}
+        if isinstance(cnc, XcApi) and "zsurvey_seq" not in view:
+            # xc-api without the ported survey: a plain Z probe here, with the
+            # daemon's own plate and travel defaults and every check it makes.
+            if self.workflow not in ("idle", "parked") or self.active != "Idle":
+                log("survey: (%s) refused: %s" % (how, self.active if self.workflow in (
+                    "idle", "parked") else "job " + self.workflow))
+                return
+            try:
+                cnc.command("probe_z")
+                log("survey: (%s) probe Z at work X%.3f Y%.3f" % (how, *self.position[:2]))
+            except OSError as error:
+                log("survey: (%s) probe refused: %s" % (how, error))
+            return
         try:
             if seq.get("state") == "waiting":
                 cnc.post("/api/zsurvey/continue", {})
@@ -1382,7 +1701,7 @@ class Carve:
         """Say, once, what the pendant's survey did: waiting for the plate, a
         point probed, stopped on an error. This is the puck's "display" for it -
         the relay's log line - until the firmware has a text row for it."""
-        if not isinstance(self.cnc, Pendant):
+        if not getattr(self.cnc, "surveys", False):
             return
         seq = (self.cnc.raw() or {}).get("zsurvey_seq")
         if not seq:
@@ -1427,9 +1746,9 @@ class Carve:
             log("bad zero: %r" % (fields,))
             return
         axis = AXES[index].upper()
-        if self.workflow != "idle" or self.active != "Idle":
+        if self.workflow not in ("idle", "parked") or self.active != "Idle":
             log("refused zero %s: %s" % (
-                axis, self.active if self.workflow == "idle" else "job " + self.workflow))
+                axis, self.active if self.workflow in ("idle", "parked") else "job " + self.workflow))
             return
         # G54..G59 are P1..P6; anything else is a parser state this doesn't know.
         if self.wcs not in ("G54", "G55", "G56", "G57", "G58", "G59"):
@@ -1738,7 +2057,8 @@ def run_relay(args, only=None):
     # Opt-in on the relay: only the machine next to the X-Carve has a CNCJS to
     # talk to and the secret to talk to it with - or a pendant holding the port.
     need_xcarve = only == "xcarve" or (only is None and (
-        getattr(args, "cncjs", None) or getattr(args, "pendant", None)))
+        getattr(args, "cncjs", None) or getattr(args, "pendant", None)
+        or getattr(args, "xc", None)))
 
     tunnel = None
     printer = None
@@ -1753,10 +2073,7 @@ def run_relay(args, only=None):
     # problems already logged - by the time there is a puck to show them on.
     cnc = None
     if need_xcarve:
-        if getattr(args, "pendant", None):
-            cnc = Pendant(args.pendant)
-        else:
-            cnc = Cncjs(args.cncjs, args.cncjs_port, args.cncrc)
+        cnc = xcarve_backend(args)
 
     # Wait rather than exit: as a service this may start before the puck is
     # plugged in, and "no puck yet" is not a failure worth restarting over.
@@ -1988,6 +2305,13 @@ def run_relay(args, only=None):
                 gantry.flush_jogs(time.time())
             if carve:
                 carve.flush_jogs(time.time())
+                # Whatever screen is up: the router starting is news for the
+                # puck's power, not for the xcarve view.
+                try:
+                    carve.forward_events()
+                except OSError as error:
+                    log("puck write failed (%s); reopening" % error)
+                    reopen()
     except KeyboardInterrupt:
         log("stopped")
     finally:
@@ -1997,6 +2321,19 @@ def run_relay(args, only=None):
         if cnc:
             cnc.close()
     return 0
+
+
+def xcarve_backend(args):
+    """Which X-Carve front the relay talks to. An explicit `--pendant` (the old
+    pendant, the fallback while xc is new) or `--cncjs` wins; otherwise xc-api,
+    the X-Carve cell's own API (`--xc`, or `$XC_URL`)."""
+    if getattr(args, "pendant", None):
+        return Pendant(args.pendant)
+    if getattr(args, "cncjs", None):
+        return Cncjs(args.cncjs, args.cncjs_port, args.cncrc)
+    if getattr(args, "xc", None):
+        return XcApi(args.xc, rate=getattr(args, "xc_rate", 5.0))
+    raise SystemExit("no X-Carve to talk to: pass --xc URL, --pendant URL or --cncjs URL")
 
 
 def cmd_relay(args):
@@ -2868,12 +3205,24 @@ def main():
                               " (default: %(default)s)")
 
     def add_xcarve_opts(sub, url):
-        sub.add_argument("--cncjs", default=url, metavar="URL",
-                         help="CNCJS base URL (default: %s)" % (url or "off"))
+        # On the Pi next to the machine xc-api is localhost; from anywhere else
+        # it is the shop LAN (http://192.168.168.5:8860), never NetBird.
+        sub.add_argument("--xc", default=os.environ.get("XC_URL") or url, metavar="URL",
+                         help="xc-api, the X-Carve cell's API (default: $XC_URL, else %s)"
+                              % (url or "off"))
+        sub.add_argument("--xc-rate", type=float, default=5.0, metavar="HZ",
+                         help="xc-api state polls per second; xc-grbld reads GRBL's status"
+                              " five times a second, so more only re-reads it"
+                              " (default: %(default)s)")
+        sub.add_argument("--quiet-ms", type=int, default=1500, metavar="MS",
+                         help="when xc-api reports the router switched on, tell the puck"
+                              " `#quiet MS` - 12 V panel rail and LED down while the inrush"
+                              " sags the Pi's 5 V; 0 = off (default: %(default)s)")
         sub.add_argument("--pendant", metavar="URL",
-                         help="go through the X-Carve pendant (xcarve_utils/pendant) instead"
-                              " of CNCJS, e.g. http://127.0.0.1:8850 - it holds the serial"
-                              " port exclusively while it is up, so CNCJS can't")
+                         help="go through the old X-Carve pendant instead of xc-api, e.g."
+                              " http://127.0.0.1:8850 - the fallback while xc is new")
+        sub.add_argument("--cncjs", metavar="URL",
+                         help="go through CNCJS instead of xc-api, e.g. http://127.0.0.1:8000")
         sub.add_argument("--cncjs-port", default="/dev/ttyUSB0",
                          help="the X-Controller's serial port, spelled as CNCJS spells it"
                               " (default: %(default)s)")
@@ -2905,8 +3254,8 @@ def main():
     gantry.set_defaults(run=cmd_gantry)
 
     xcarve = subparsers.add_parser(
-        "xcarve", help="drive the X-Carve with the knob, through CNCJS or the pendant")
-    add_xcarve_opts(xcarve, "http://127.0.0.1:8000")
+        "xcarve", help="drive the X-Carve with the knob, through xc-api (or the pendant, CNCJS)")
+    add_xcarve_opts(xcarve, "http://127.0.0.1:8860")
     xcarve.add_argument("--jog-interval", type=float, default=0.12, metavar="SECONDS",
                         help="how long to gather jogs before sending them as one move"
                              " (default: %(default)s)")
