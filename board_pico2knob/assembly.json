@@ -1,0 +1,80 @@
+{
+  "boards": {
+    "pico2-knob": {
+      "pcb": "bom/rev2-src/pico2-knob.kicad_pcb"
+    }
+  },
+  "out": "bom",
+  "ibom": {
+    "checkboxes": "Board 1,Board 2",
+    "show_fields": "Value,Footprint,MFRPN"
+  },
+  "board_notes": {
+    "pico2-knob": "Rev 2 (JLC Y4, ordered 2026-10-15). The board file is the uncommitted rev 2 copy from ice-cubed (<code>~/newhome/softek/pico2-knob</code>); its copper matches the fabbed gerbers."
+  },
+  "parts": [
+    {
+      "match": "SS14",
+      "datasheet": "https://www.vishay.com/docs/88746/ss12.pdf",
+      "mark": {
+        "kind": "bar",
+        "pin": "K",
+        "label": "BAND (K)",
+        "text": "The cathode goes to +12V."
+      },
+      "pages": [
+        {
+          "page": 1,
+          "label": "Polarity"
+        },
+        {
+          "page": 4,
+          "label": "Outline"
+        }
+      ],
+      "figures": [
+        {
+          "page": 4,
+          "crop": [
+            0.03,
+            0.07,
+            0.62,
+            0.43
+          ],
+          "caption": "SMA outline: the cathode band end"
+        }
+      ]
+    },
+    {
+      "match": "Q1",
+      "note": "SOT-23: the single leg on one side is D (3); G (1) and S (2) are on the other side. Rev 2 has S on +BATT and D on U2 Vin, so the rev 1 leg-swap bodge is <b>not</b> needed.",
+      "warn": "Fitted part is <b>MMFTP3401</b> (from the rev 1 stock), not the DMG3415U in the schematic. It has the same SOT-23 pinout: 1 = G, 2 = S, 3 = D."
+    },
+    {
+      "match": "MC34063AD",
+      "datasheet": "https://www.onsemi.com/download/data-sheet/pdf/mc34063a-d.pdf",
+      "pages": [
+        {
+          "page": 1,
+          "label": "Pinout"
+        }
+      ]
+    },
+    {
+      "match": "nice!nano_v2",
+      "note": "Goes on the <b>back</b>, on female sockets, with USB-C facing the top rim (README)."
+    },
+    {
+      "match": "ER-CON20HT-1",
+      "note": "0.5 mm pitch: the stencil has 0.20 mm apertures here (mechanical/stencil/README.md)."
+    },
+    {
+      "match": "LiPo_JST_PH",
+      "note": "JST-PH LiPo packs don't share a polarity convention. Check the pack's red lead against BAT+ before plugging in."
+    },
+    {
+      "match": "C1",
+      "note": "Fitted from stock as <b>820 pF</b>; the schematic says 800 pF (orders/README.md)."
+    }
+  ]
+}
