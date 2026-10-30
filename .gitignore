@@ -52,3 +52,6 @@ lib/marbastlib/symbols/*
 # firmware build output
 firmware/target/
 firmware/out/
+
+# unpacked rev2 gerbers; the ordered set is the committed zip
+/board_pico2knob/jlcpcb/rev2/

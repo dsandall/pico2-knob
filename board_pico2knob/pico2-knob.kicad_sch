@@ -4529,10 +4529,10 @@
 		(uuid "07925b6d-0ecc-4a95-a21a-9567dd99ba97")
 	)
 	(junction
-		(at 166.37 134.62)
+		(at 153.67 119.38)
 		(diameter 0)
 		(color 0 0 0 0)
-		(uuid "1ee246c3-38fc-4957-88d2-910d9f9103be")
+		(uuid "2349aa25-1644-4ce4-803f-e89fa796c507")
 	)
 	(junction
 		(at 237.49 88.9)
@@ -4545,12 +4545,6 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "2edbe72a-de8a-4696-b355-19a1a00c64f1")
-	)
-	(junction
-		(at 157.48 119.38)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "334de036-43f9-4066-8f41-5897a5a56bf1")
 	)
 	(junction
 		(at 236.22 63.5)
@@ -4683,6 +4677,12 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "a86ac2dc-70d4-4268-bc9e-1cc2fe368598")
+	)
+	(junction
+		(at 173.99 134.62)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "aaea2594-45e8-41e2-88de-70fc05b8b95e")
 	)
 	(junction
 		(at 236.22 55.88)
@@ -4932,6 +4932,16 @@
 	)
 	(wire
 		(pts
+			(xy 153.67 119.38) (xy 157.48 119.38)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "15943606-c7e4-437c-88f2-8872182dc50c")
+	)
+	(wire
+		(pts
 			(xy 227.33 48.26) (xy 227.33 49.53)
 		)
 		(stroke
@@ -4992,13 +5002,13 @@
 	)
 	(wire
 		(pts
-			(xy 166.37 129.54) (xy 166.37 134.62)
+			(xy 166.37 129.54) (xy 170.18 129.54)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "20eea1ba-917b-4b71-8ba4-bdd7144b7b14")
+		(uuid "2168a6a1-7d8b-4cc9-936f-073f16624eae")
 	)
 	(wire
 		(pts
@@ -5262,6 +5272,16 @@
 	)
 	(wire
 		(pts
+			(xy 166.37 119.38) (xy 173.99 119.38)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "49b6aac6-d5d4-4b98-9447-c4526b5235ab")
+	)
+	(wire
+		(pts
 			(xy 226.06 63.5) (xy 236.22 63.5)
 		)
 		(stroke
@@ -5299,16 +5319,6 @@
 			(type default)
 		)
 		(uuid "4f439dfc-6653-4bf7-a106-211674146ceb")
-	)
-	(wire
-		(pts
-			(xy 157.48 119.38) (xy 166.37 119.38)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "4f632218-639a-4602-9ff2-ce452605bcd6")
 	)
 	(wire
 		(pts
@@ -5359,16 +5369,6 @@
 			(type default)
 		)
 		(uuid "5ce4a2ca-f68e-4e59-bad7-024b87865908")
-	)
-	(wire
-		(pts
-			(xy 151.13 118.11) (xy 151.13 119.38)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "5e9ee8a2-18d0-4373-ae98-b58942b815f9")
 	)
 	(wire
 		(pts
@@ -5742,7 +5742,7 @@
 	)
 	(wire
 		(pts
-			(xy 151.13 119.38) (xy 157.48 119.38)
+			(xy 151.13 119.38) (xy 153.67 119.38)
 		)
 		(stroke
 			(width 0)
@@ -6212,6 +6212,16 @@
 	)
 	(wire
 		(pts
+			(xy 173.99 119.38) (xy 173.99 134.62)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e815ede0-55ee-44cc-bd2d-4d29a636451f")
+	)
+	(wire
+		(pts
 			(xy 212.09 63.5) (xy 226.06 63.5)
 		)
 		(stroke
@@ -6269,6 +6279,16 @@
 			(type default)
 		)
 		(uuid "f286087b-cca7-4100-988a-80c97563541b")
+	)
+	(wire
+		(pts
+			(xy 153.67 118.11) (xy 153.67 119.38)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "f2fd37c1-1c32-47a4-a20b-4db402848940")
 	)
 	(wire
 		(pts
@@ -6994,7 +7014,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal"
+		(property "Footprint" "Resistor_SMD:R_1206_3216Metric"
 			(at 232.156 142.494 90)
 			(hide yes)
 			(show_name no)
@@ -7027,7 +7047,7 @@
 				)
 			)
 		)
-		(property "MFRPN" "CFR-25JB-52-R68"
+		(property "MFRPN" "RC1206FR-078K66L"
 			(at 16.51 1.27 0)
 			(hide yes)
 			(show_name no)
@@ -7477,84 +7497,6 @@
 		)
 	)
 	(symbol
-		(lib_id "power:+BATT")
-		(at 151.13 118.11 0)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(fields_autoplaced yes)
-		(uuid "4bbede3f-b849-4e1f-be21-db126b0f2310")
-		(property "Reference" "#PWR05"
-			(at 151.13 121.92 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "+BATT"
-			(at 151.13 113.03 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" ""
-			(at 151.13 118.11 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" ""
-			(at 151.13 118.11 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "Power symbol creates a global label with name \"+BATT\""
-			(at 151.13 118.11 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "1"
-			(uuid "7bd3349a-d064-4ce0-b518-9f9490503f65")
-		)
-		(instances
-			(project "pico2-knob"
-				(path "/dbcb8cfe-f4da-4f0e-94be-1af05accddbf"
-					(reference "#PWR05")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
 		(lib_id "Device:RotaryEncoder_Switch")
 		(at 53.34 125.73 0)
 		(unit 1)
@@ -7646,6 +7588,84 @@
 			(project "pico2-knob"
 				(path "/dbcb8cfe-f4da-4f0e-94be-1af05accddbf"
 					(reference "RE1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+BATT")
+		(at 153.67 118.11 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "4cb99f93-6776-4df2-976c-8537ff275bba")
+		(property "Reference" "#PWR020"
+			(at 153.67 121.92 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "+BATT"
+			(at 153.67 113.03 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 153.67 118.11 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 153.67 118.11 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+BATT\""
+			(at 153.67 118.11 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "6959e293-e441-401e-a978-e637286b8d08")
+		)
+		(instances
+			(project "pico2-knob"
+				(path "/dbcb8cfe-f4da-4f0e-94be-1af05accddbf"
+					(reference "#PWR020")
 					(unit 1)
 				)
 			)
@@ -8023,7 +8043,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal"
+		(property "Footprint" "Resistor_SMD:R_1206_3216Metric"
 			(at 232.156 152.654 90)
 			(hide yes)
 			(show_name no)
@@ -8056,7 +8076,7 @@
 				)
 			)
 		)
-		(property "MFRPN" "MFR-25FBF52-1K"
+		(property "MFRPN" "RC1206FR-071KL"
 			(at 11.43 1.27 0)
 			(hide yes)
 			(show_name no)
@@ -8077,6 +8097,81 @@
 			(project "pico2-knob"
 				(path "/dbcb8cfe-f4da-4f0e-94be-1af05accddbf"
 					(reference "R4")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+BATT")
+		(at 170.18 129.54 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "647534b1-52dd-417b-b3f0-f8dc604dde19")
+		(property "Reference" "#PWR031"
+			(at -1.016 6.35 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "+BATT"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" ""
+			(at 170.18 129.54 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "1e441374-d558-4586-ab94-49a724a5bd0c")
+		)
+		(instances
+			(project "pico2-knob"
+				(path "/dbcb8cfe-f4da-4f0e-94be-1af05accddbf"
+					(reference "#PWR031")
 					(unit 1)
 				)
 			)
@@ -8180,7 +8275,7 @@
 				)
 			)
 		)
-		(property "Value" ".68"
+		(property "Value" "1"
 			(at 185.674 118.11 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8223,7 +8318,7 @@
 				)
 			)
 		)
-		(property "MFRPN" "MFR-25FBF52-8K66"
+		(property "MFRPN" "MFR-25FBF52-1R"
 			(at 59.69 334.01 0)
 			(hide yes)
 			(show_name no)
@@ -8392,7 +8487,7 @@
 				)
 			)
 		)
-		(property "MFRPN" "CFR-25JB-52-R68"
+		(property "MFRPN" "MFR-25FBF52-100K"
 			(at -57.15 -17.78 0)
 			(hide yes)
 			(show_name no)
@@ -9731,7 +9826,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "180"
+		(property "Value" "150"
 			(at 210.82 130.8099 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9775,7 +9870,7 @@
 				)
 			)
 		)
-		(property "MFRPN" "CFR-25JB-52-R68"
+		(property "MFRPN" "MFR-25FBF52-150R"
 			(at -6.35 -11.43 0)
 			(hide yes)
 			(show_name no)
@@ -10634,7 +10729,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "910k"
+		(property "Value" "1M"
 			(at 211.582 53.34 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10678,7 +10773,7 @@
 				)
 			)
 		)
-		(property "MFRPN" "MFR-25FBF52-910K"
+		(property "MFRPN" "MFR-25FBF52-1M"
 			(at 261.62 -115.57 0)
 			(hide yes)
 			(show_name no)
