@@ -58,6 +58,7 @@ import urllib.request
 import zipfile
 
 AXES = ("x", "y", "z")
+MANUAL_LIMIT_UM = 1000000000
 
 # Klipper's names for what it is doing, mapped onto the small enum the puck
 # displays. Anything unlisted reads as "idle", which is the honest answer.
@@ -415,7 +416,8 @@ class Moonraker:
 
     def status(self):
         query = ("toolhead=position,axis_minimum,axis_maximum,homed_axes"
-                 "&gcode_move=gcode_position&print_stats=state")
+                 "&gcode_move=gcode_position&print_stats=state"
+                 "&gcode_macro%20MANUAL_ON=armed")
         return self._request("/printer/objects/query?" + query)["result"]["status"]
 
     def gcode(self, script):
@@ -489,6 +491,7 @@ class Gantry:
         self.limits = None
         self.limits_sent = 0.0
         self.homed = ""
+        self.manual = False
         self.state = 0
         self.position = [0.0, 0.0, 0.0]
         # Jogs waiting to go out, in micrometres per axis. The puck already
@@ -509,6 +512,12 @@ class Gantry:
         # gcode_position is what every other UI shows, so it is what the puck shows.
         self.position = (move.get("gcode_position") or toolhead.get("position") or [0, 0, 0])[:3]
         self.homed = toolhead.get("homed_axes", "") or ""
+        # Manual override (manual_override.cfg): the puck refuses unhomed jogs and
+        # enforces limits itself, so tell it everything is homed and unbounded.
+        manual = bool(status.get("gcode_macro MANUAL_ON", {}).get("armed")) and not self.homed
+        if manual != self.manual:
+            self.limits_sent = 0.0
+        self.manual = manual
         self.state = STATES.get(stats.get("state", ""), 1 if self.homed else 0)
         minimum, maximum = toolhead.get("axis_minimum"), toolhead.get("axis_maximum")
         if minimum and maximum:
@@ -517,7 +526,7 @@ class Gantry:
     def push(self, now):
         bits = 0
         for index, axis in enumerate(AXES):
-            if axis in self.homed:
+            if axis in self.homed or self.manual:
                 bits |= 1 << index
         self.link.send("#s %d %d %d %d %d" % (
             um(self.position[0]), um(self.position[1]), um(self.position[2]), bits, self.state))
@@ -525,7 +534,7 @@ class Gantry:
             self.limits_sent = now
             flat = []
             for low, high in self.limits:
-                flat += [low, high]
+                flat += [-MANUAL_LIMIT_UM, MANUAL_LIMIT_UM] if self.manual else [low, high]
             self.link.send("#l " + " ".join(str(v) for v in flat))
 
     def handle(self, line):
@@ -560,6 +569,13 @@ class Gantry:
         axis = AXES[axis_index]
         if self.state == 2:
             log("refused jog %s: printing" % axis.upper())
+            return
+        if self.manual:
+            try:
+                self.printer.gcode("MANUAL_JOG AXIS=%s DIST=%.3f" % (axis.upper(), delta_um / 1000.0))
+                log("manual jog %s %+.3f mm" % (axis.upper(), delta_um / 1000.0))
+            except OSError as error:  # HTTPError included: a refusal drops the connection
+                log("manual jog %s failed: %s" % (axis.upper(), error))
             return
         if axis not in self.homed:
             log("refused jog %s: not homed" % axis.upper())
